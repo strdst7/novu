@@ -1,0 +1,252 @@
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "docker"
+    directory: "/.cursor"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/.deepsec"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "docker"
+    directory: "/.devcontainer"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "docker"
+    directory: "/apps/api"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/apps/api"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/apps/dashboard"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/apps/human-dashboard"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/apps/human-mcp"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "docker"
+    directory: "/apps/inbound-mail"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/apps/inbound-mail"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "docker"
+    directory: "/apps/webhook"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/apps/webhook"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "docker"
+    directory: "/apps/worker"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/apps/worker"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "docker"
+    directory: "/apps/ws"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/apps/ws"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/libs/agent-evals"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/libs/application-generic"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/libs/automation"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/libs/dal"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/libs/internal-sdk"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/libs/maily-core"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/libs/maily-render"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/libs/maily-tailwind-config"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/libs/maily-tsconfig"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/libs/notifications"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/libs/testing"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/packages/add-inbox"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/packages/agent-event-protocol"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/packages/agent-toolkit"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/packages/agentinbox"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/packages/chat-adapter"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/packages/chat-adapter-email"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/packages/chat-adapter-photon-imessage"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/packages/chat-adapter-sendblue"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/packages/chat-adapter-web-chat"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/packages/framework"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/packages/js"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/packages/nextjs"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/packages/novu"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/packages/providers"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/packages/react"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/packages/react-native"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/packages/shared"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/packages/stateless"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/playground/nestjs"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/playground/nextjs"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/playground/web-chat"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
