@@ -44,6 +44,11 @@ export type InviteStatus =
       agentName: string;
       /** Where the agent's own picture can be loaded. Missing when it has none. */
       agentPictureUrl?: string;
+      /**
+       * The agent's look, as the API answered it, for its mascot on this page (read it with `mascotLookOf`).
+       * Missing while its mascots show as they always have.
+       */
+      agentLook?: unknown;
       /** Who invited them: the account owner's name. Missing when they haven't given one. */
       inviterName?: string;
       /** Display name of the invited person, falling back to their subscriberId. */
@@ -108,12 +113,12 @@ export class InviteRequestError extends Error {
 }
 
 /**
- * Public invite endpoints of the Novu API. The token from the invite link is the only
+ * Public invite endpoints of Agent Inbox's API (this site's `/api`). The token from the invite link is the only
  * credential, so nothing here sends cookies or API keys.
  */
 export async function getInviteStatus(apiUrl: string, token: string, signal?: AbortSignal): Promise<InviteStatus> {
   const status = await request<InviteStatus>(
-    `${apiUrl}/v1/human/invites/status?token=${encodeURIComponent(token)}`,
+    `${apiUrl}/v1/invites/status?token=${encodeURIComponent(token)}`,
     { method: 'GET', signal },
     'Failed to load the invitation'
   );
@@ -154,14 +159,14 @@ export async function declineInvite(apiUrl: string, token: string): Promise<{ de
 /** Claims a verification token from the email link. */
 export async function verifyAddress(apiUrl: string, token: string, signal?: AbortSignal): Promise<VerifyAddressResult> {
   return request<VerifyAddressResult>(
-    `${apiUrl}/v1/human/verify`,
+    `${apiUrl}/v1/verify`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token }),
       signal,
     },
-    'Failed to verify this email'
+    'Failed to confirm this email'
   );
 }
 
@@ -172,7 +177,7 @@ async function postAction<T>(
   fallbackMessage: string
 ): Promise<T> {
   return request<T>(
-    `${apiUrl}/v1/human/invites/${action}`,
+    `${apiUrl}/v1/invites/${action}`,
     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
     fallbackMessage
   );

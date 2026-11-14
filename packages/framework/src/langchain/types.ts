@@ -12,6 +12,7 @@ import type {
   AgentMessageUpdatedContext,
   MessageContent,
   ReplyHandle,
+  ReplyStream,
   ToolApprovalDecision,
 } from '../resources/agent/agent.types';
 import type { Awaitable } from '../types/util.types';
@@ -59,6 +60,17 @@ export interface LangChainAgentConfig {
    * are not streamed.
    */
   formatReply?: (text: string) => Awaitable<MessageContent | void>;
+  /**
+   * Optional text streamed after the model's reply once the run completes (e.g. a link),
+   * so the reply itself still streams. Ignored when `formatReply` is set or the run ends
+   * on a tool approval. Return `undefined` or an empty string to add nothing.
+   */
+  replyFooter?: () => string | undefined;
+  /**
+   * Optional message posted on its own after the reply once the run completes (e.g. a card with
+   * buttons). Ignored when the run ends on a tool approval. Return `undefined` to post nothing.
+   */
+  replyFollowUp?: () => Awaitable<MessageContent | undefined>;
 }
 
 /**
@@ -77,13 +89,17 @@ export type LangChainResult = LangChainAgentConfig | LangChainInvokeResult | Bas
  *
  * Extends {@link AgentHandlers}: same events and config (`toolApproval`, etc.),
  * but `onMessage` and `onToolApproval` may return a {@link LangChainResult} for
- * automatic delivery.
+ * automatic delivery. `onMessage` may also return a {@link ReplyStream} directly,
+ * same as core `agent()` — it is passed through to the reply for streaming.
  */
 export type LangChainAgentHandlers = Omit<
   AgentHandlers,
   'onMessage' | 'onToolApproval' | 'onMessageUpdated' | 'onMessageDeleted'
 > & {
-  onMessage: (message: AgentMessage, ctx: AgentMessageContext) => Awaitable<MessageContent | LangChainResult | void>;
+  onMessage: (
+    message: AgentMessage,
+    ctx: AgentMessageContext
+  ) => Awaitable<MessageContent | ReplyStream | LangChainResult | void>;
   onMessageUpdated?: (
     message: AgentMessage,
     ctx: AgentMessageUpdatedContext

@@ -1,7 +1,7 @@
 import 'server-only';
 
 import type { User } from '@clerk/nextjs/server';
-
+import { loadFeatures } from './feature-flags';
 import { hostLiveness } from './host-status';
 import type { HumanAccount } from './human-account';
 import { getRelayAgent } from './human-agent-api';
@@ -24,10 +24,11 @@ export async function loadOwnShareImage(account: HumanAccount, user: User): Prom
     return null;
   }
 
-  const [{ rows, telegramSetup, slackSetup }, hostStatus, origin] = await Promise.all([
+  const [{ rows, telegramSetup, slackSetup }, hostStatus, origin, features] = await Promise.all([
     loadChannelsOverview(account),
     loadHostStatus(account),
     readSiteOrigin(),
+    loadFeatures(account),
   ]);
 
   // As the Configure page reads them for its card.
@@ -46,12 +47,14 @@ export async function loadOwnShareImage(account: HumanAccount, user: User): Prom
     cardLink: identity.cardLink,
     pictureUrl: identity.pictureUrl,
     createdAt: identity.createdAt,
-    operatorName: [user.firstName, user.lastName].filter(Boolean).join(' '),
-    operatorFirstName: user.firstName ?? '',
-    state: !agent.active ? 'paused' : hostConnected ? 'active' : 'waiting',
+    operatorName: agent.operatorName,
+    operatorFirstName: agent.operatorFirstName,
+    state: !agent.active || agent.settings?.paused ? 'paused' : hostConnected ? 'active' : 'waiting',
     telegram: connected('telegram') ? { bot: telegramBot ? `@${telegramBot}` : null } : null,
     host: { connected: hostConnected },
     slack: connected('slack') ? slackNames || 'Connected' : null,
+    look: agent.look,
+    newCard: features.newOnboarding,
   };
 }
 
@@ -65,9 +68,10 @@ export function publicShareImage(card: PublicAgentCard): ShareImageCard {
     pictureUrl: card.pictureUrl ?? undefined,
     createdAt: card.issuedAt,
     operatorName: card.operatorName,
-    // "Run by Dima Grossman" makes "Dima’s agent".
-    operatorFirstName: card.operatorName.split(' ')[0] ?? '',
+    operatorFirstName: card.operatorFirstName,
     state: card.status,
     telegram: card.telegramBot ? { bot: card.telegramBot } : null,
+    look: card.look,
+    newCard: card.newCard,
   };
 }

@@ -1,6 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { AgentRepository, HumanContactRepository, SubscriberRepository } from '@novu/dal';
+import { type AgentEntity, AgentRepository, HumanContactRepository, SubscriberRepository } from '@novu/dal';
+import type { HumanOperatorResponseDto } from '../dtos/setup-human-relay.dto';
+import { agentLookOf } from './agent-look';
+import { buildRelayOwnerCardName } from './relay-owner-name';
 
 /** The subscriberId `human setup` made up for the operator before the API kept track: `human_` and 12 hex characters. */
 const CLI_OPERATOR_ID_PATTERN = /^human_[0-9a-f]{12}$/;
@@ -9,6 +12,9 @@ type OperatorScope = { environmentId: string; organizationId: string; agentId: s
 
 /** A relay agent named by its identifier instead of its internal id. */
 type RelayScope = Omit<OperatorScope, 'agentId'> & { agentIdentifier: string };
+
+/** The operator as an agent's card shows them: "Ada L.", and their first name for "Ada’s agent". */
+export type OperatorCardName = { operatorName: string; operatorFirstName: string };
 
 /**
  * Which contact is the account owner. The CLI and the Human dashboard both ask here, so an operator who
@@ -31,6 +37,22 @@ export class HumanOperatorService {
     const agentId = await this.findRelayAgentId(scope);
 
     return agentId ? this.findForAgent({ ...scope, agentId }) : null;
+  }
+
+  /**
+   * The operator's contact, and the agent's look for the CLI's mascot, from one read of the agent. It is what
+   * the CLI asks right after `login`, when it knows neither. Before `human setup` has made the agent there is
+   * no look, and nobody is its operator.
+   */
+  async describe(scope: RelayScope): Promise<HumanOperatorResponseDto> {
+    const agent = await this.findRelayAgent(scope);
+    if (!agent) {
+      return {};
+    }
+
+    const subscriberId = await this.findForAgent({ ...scope, agentId: agent._id });
+
+    return { ...(subscriberId ? { subscriberId } : {}), agentLook: agentLookOf(agent) };
   }
 
   /**
@@ -58,16 +80,20 @@ export class HumanOperatorService {
   }
 
   private async findRelayAgentId(scope: RelayScope): Promise<string | null> {
+    return (await this.findRelayAgent(scope))?._id ?? null;
+  }
+
+  private async findRelayAgent(scope: RelayScope): Promise<Pick<AgentEntity, '_id' | 'look'> | null> {
     const agent = await this.agentRepository.findOne(
       {
         identifier: scope.agentIdentifier,
         _environmentId: scope.environmentId,
         _organizationId: scope.organizationId,
       },
-      ['_id', 'runtime']
+      ['_id', 'runtime', 'look']
     );
 
-    return agent?.runtime === 'human_relay' ? agent._id : null;
+    return agent?.runtime === 'human_relay' ? agent : null;
   }
 
   /**
@@ -106,5 +132,25 @@ export class HumanOperatorService {
     );
 
     return madeByCli?.subscriberId ?? null;
+  }
+
+  /**
+   * The operator as the agent's card names them, "Ada L.", with their whole first name for "Ada’s agent". The
+   * public card and the operator's own card on the Configure page both read it here, so they never disagree.
+   * Nothing without an operator or a first name.
+   */
+  async cardNameFor(scope: OperatorScope): Promise<OperatorCardName | undefined> {
+    const operatorId = await this.findForAgent(scope);
+    if (!operatorId) {
+      return undefined;
+    }
+
+    const operator = await this.subscriberRepository.findOne(
+      { _environmentId: scope.environmentId, subscriberId: operatorId },
+      'firstName lastName'
+    );
+    const operatorName = buildRelayOwnerCardName(operator?.firstName, operator?.lastName);
+
+    return operatorName ? { operatorName, operatorFirstName: operator?.firstName?.trim() ?? '' } : undefined;
   }
 }

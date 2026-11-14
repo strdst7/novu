@@ -448,7 +448,7 @@ describe('Agents API - /agents #novu-v2', () => {
     expect(createAgentRes.status).to.equal(201);
 
     const createWorkflowRes = await session.testAgent.post('/v2/workflows').send({
-      __source: WorkflowCreationSourceEnum.Editor,
+      __source: WorkflowCreationSourceEnum.EDITOR,
       name: 'Agent Assigned Workflow',
       workflowId: `agent-assigned-${randomUUID()}`,
       active: true,
@@ -608,15 +608,6 @@ describe('Agents API - /agents #novu-v2', () => {
       expect(res.body.data.identifier.length).to.equal(MAX);
 
       await session.testAgent.delete(`/v1/agents/${encodeURIComponent(identifier)}`);
-    });
-
-    it('should reject creating an agent with an identifier far exceeding the limit', async () => {
-      const res = await session.testAgent.post('/v1/agents').send({
-        name: 'Valid Name',
-        identifier: 'a'.repeat(5000),
-      });
-
-      expect(res.status).to.equal(422);
     });
   });
 

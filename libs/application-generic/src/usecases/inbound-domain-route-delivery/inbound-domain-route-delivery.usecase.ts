@@ -3,7 +3,6 @@ import { AgentIntegrationRepository, DomainEntity, DomainRouteEntity, Integratio
 import {
   AGENT_INBOX_PROVIDER_IDS,
   ChannelTypeEnum,
-  EmailProviderIdEnum,
   EmailWebhookPayload,
   FeatureFlagsKeysEnum,
   InboundEmailAttachment,
@@ -15,6 +14,7 @@ import { decryptSecret } from '../../encryption/encrypt-provider';
 import { PinoLogger } from '../../logging';
 import { FeatureFlagsService } from '../../services/feature-flags';
 import { HttpClientService } from '../../services/http-client/http-client.service';
+import { getNovuServiceCa } from '../../services/tls';
 import { pickAgentInboxIntegration } from '../../utils/agent-shared-inbox';
 import { buildNovuSignatureHeader } from '../../utils/hmac';
 import { normalizeReferences } from '../../utils/inbound-email-references';
@@ -103,6 +103,12 @@ export interface InboundDomainRouteMailInput {
    */
   dkim?: string;
   spf?: string;
+  /**
+   * The domains those verdicts vouch for (see `IInboundParseDataDto`). The
+   * agent runtime trusts `from` only when one of them is its domain.
+   */
+  dkimDomains?: string[];
+  spfDomain?: string | null;
 }
 
 @Injectable()
@@ -234,6 +240,7 @@ export class InboundDomainRouteDelivery {
       body: payload,
       headers: { 'novu-signature': signature, 'content-type': 'application/json' },
       timeout: 30_000,
+      ca: getNovuServiceCa(),
     });
 
     return {
@@ -264,6 +271,8 @@ export class InboundDomainRouteDelivery {
       references: refs.length > 0 ? refs.join(' ') : undefined,
       dkim: mail.dkim,
       spf: mail.spf,
+      dkimDomains: mail.dkimDomains,
+      spfDomain: mail.spfDomain,
       from: { address: from.address, name: from.name },
       to: mail.to.map((t: { address: string; name?: string }) => ({
         address: t.address,

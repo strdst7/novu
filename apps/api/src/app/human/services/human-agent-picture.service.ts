@@ -2,8 +2,13 @@ import { createHash } from 'node:crypto';
 import { BadRequestException, Injectable, NotFoundException, PayloadTooLargeException } from '@nestjs/common';
 import { PinoLogger, StorageService } from '@novu/application-generic';
 import { AgentEntity, type AgentPicture, AgentRepository } from '@novu/dal';
+import { relayAcknowledgesMessages } from '../../agents/human-relay/relay-acknowledges-messages';
 import type { HumanAgentResponseDto } from '../dtos/human-agent.dto';
+import { AgentInboxFeaturesService } from './agent-inbox-features.service';
+import { agentLookOf, cardShownOf } from './agent-look';
+import { agentPictureUrl } from './agent-picture-url';
 import { HumanAgentIdentityService } from './human-agent-identity.service';
+import { HumanOperatorService } from './human-operator.service';
 
 /** Plenty for a picture shown in a small circle, and small enough for every channel to take. */
 export const AGENT_PICTURE_MAX_BYTES = 2 * 1024 * 1024;
@@ -32,22 +37,12 @@ export function detectPictureType(file: Buffer): PictureType | null {
   return null;
 }
 
-/** Where anyone can load the agent's picture, or nothing when it has none. */
-export function agentPictureUrl(agent: Pick<AgentEntity, '_id' | '_environmentId' | 'picture'>): string | undefined {
-  if (!agent.picture?.storageKey) {
-    return undefined;
-  }
-
-  const base = (process.env.API_ROOT_URL ?? 'https://api.novu.co').replace(/\/$/, '');
-
-  return `${base}/v1/human/agent-pictures/${agent._environmentId}/${agent._id}/${agent.picture.version}`;
-}
-
 type AgentScope = { environmentId: string; organizationId: string; agentIdentifier: string };
 
 /**
  * The relay agent's picture: kept in file storage, served from a public address (the invite page is
- * public too), and set on the agent's Telegram bots. A Slack app's icon can only be changed in Slack.
+ * public too), and set on the agent's Telegram bots. A Slack app takes it as its icon when it's created, and
+ * after that the icon can only be changed in Slack. An agent with no picture shows its mascot in those places.
  */
 @Injectable()
 export class HumanAgentPictureService {
@@ -55,6 +50,8 @@ export class HumanAgentPictureService {
     private readonly agentRepository: AgentRepository,
     private readonly storageService: StorageService,
     private readonly humanAgentIdentity: HumanAgentIdentityService,
+    private readonly humanOperator: HumanOperatorService,
+    private readonly agentInboxFeatures: AgentInboxFeaturesService,
     private readonly logger: PinoLogger
   ) {
     this.logger.setContext(this.constructor.name);
@@ -63,6 +60,7 @@ export class HumanAgentPictureService {
   /** The agent as the Human endpoints report it. */
   describe(agent: AgentEntity): HumanAgentResponseDto {
     const pictureUrl = agentPictureUrl(agent);
+    const cardShown = cardShownOf(agent);
 
     return {
       agentId: agent._id,
@@ -70,17 +68,26 @@ export class HumanAgentPictureService {
       name: agent.name,
       ...(agent.description ? { description: agent.description } : {}),
       ...(pictureUrl ? { pictureUrl } : {}),
+      look: agentLookOf(agent),
+      ...(cardShown ? { cardShown } : {}),
       active: agent.active !== false,
       createdAt: agent.createdAt,
       reach: agent.reach ?? 'anyone',
       paused: Boolean(agent.pausedAt),
       ...(agent.pausedAt ? { pausedAt: agent.pausedAt } : {}),
+      acknowledgeOnReceived: relayAcknowledgesMessages(agent),
     };
   }
 
-  /** The relay agent, or a 404 before `human setup` has made it. */
+  /**
+   * The relay agent, or a 404 before `human setup` has made it. This read also names the operator as the agent's
+   * card does, for the Configure page's card; the answers to changes leave that lookup out.
+   */
   async get(scope: AgentScope): Promise<HumanAgentResponseDto> {
-    return this.describe(await this.findRelay(scope));
+    const agent = await this.findRelay(scope);
+    const operator = await this.humanOperator.cardNameFor({ ...scope, agentId: agent._id });
+
+    return { ...this.describe(agent), ...operator };
   }
 
   async save(scope: AgentScope, file: Buffer): Promise<AgentEntity> {
@@ -127,7 +134,11 @@ export class HumanAgentPictureService {
       { $unset: { picture: 1 } }
     );
     await this.deleteFile(agent.picture.storageKey);
-    await this.humanAgentIdentity.updateTelegramBots(agent, { picture: null });
+    // Its bots go back to its mascot, in the look its mascots show.
+    await this.humanAgentIdentity.updateTelegramBots(agent, {
+      picture: null,
+      mascot: await this.agentInboxFeatures.mascotLookOf(agent),
+    });
 
     return { ...agent, picture: undefined };
   }

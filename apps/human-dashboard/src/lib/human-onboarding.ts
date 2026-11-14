@@ -4,112 +4,204 @@ import type { User } from '@clerk/nextjs/server';
 import { redirect } from 'next/navigation';
 import { cache } from 'react';
 import type { AgentReach } from './agent-settings';
+import { buildChannelPrompt } from './agent-setup-prompt';
+import { isToolId, type ToolId } from './ai-tools';
 import { findCurrentUser } from './auth-page';
+import { type AgentInboxFeatures, loadFeatures } from './feature-flags';
+import type { HostStatus } from './host-status';
+import type { HostId } from './hosts';
 import type { HumanAccount } from './human-account';
-import { DEFAULT_AGENT_NAME, getRelayAgent, type RelayAgent } from './human-agent-api';
+import {
+  agentDisplayName,
+  type CardShown,
+  DEFAULT_AGENT_NAME,
+  getRelayAgent,
+  type RelayAgent,
+} from './human-agent-api';
 import { requestForAccount } from './human-api-key';
 import { listChannels } from './human-channels-api';
-import { listConnectedTools } from './human-tools-api';
-import { addressOf, cardLinkOf, type HostVia, ONBOARDING_PATH, type OnboardingStep, toHandle } from './onboarding';
-import { advanceMocks, connectCode } from './onboarding-mocks';
+import { loadChannelsOverview } from './human-channels-overview';
+import { loadHostStatus } from './human-hosts-api';
+import { getInboxThread, listInboxThreads } from './human-inbox-api';
+import type { SlackSetupState } from './human-slack-setup';
+import type { TelegramSetupState } from './human-telegram-setup';
+import { listSignIns, readMcpUrl, type SignIn } from './human-tools-api';
+import {
+  activityIsAfter,
+  humanMessageAfter,
+  type InboundEmail,
+  inboundEmailFrom,
+  latestHumanMessageAt,
+  newestInboundEmail,
+  preferNewerInbound,
+} from './inbound-email';
+import type { InboxThread } from './inbox';
+import type { AgentLook } from './look';
+import {
+  AGENT_DOMAIN,
+  cardLinkOf,
+  ONBOARDING_PATH,
+  type OnboardingStep,
+  onboardingConnectPath,
+  toHandle,
+} from './onboarding';
+import {
+  awaitsTestMail,
+  belongsInOnboarding,
+  isSetupUnfinished,
+  rememberTestReply,
+  resolveStep,
+  type SetupStep,
+  signedInSince,
+  wasMadeInTheSteps,
+} from './onboarding-progress';
 import { type OnboardingState, readOnboardingState, writeOnboardingState } from './onboarding-state';
-import { readSiteOrigin } from './site-origin';
+import { legacyStepOf, resolveSayHiStep, type SayHiStep } from './say-hi-progress';
+import { readApiUrl, readSiteOrigin } from './site-origin';
 
-/** Where an operator stands: on one of the four steps, or `done` with them. */
-export type SetupStep = OnboardingStep | 'done';
+export { isSetupUnfinished, resolveStep, type SetupStep, wasMadeInTheSteps };
 
 export type SetupProgress = {
+  /** The earlier onboarding's step, which the dashboard's banners and redirects read in either onboarding. */
   step: SetupStep;
+  /** The step of the onboarding where the agent says hi with its card, or `null` where the account hasn't got it. */
+  sayHiStep: SayHiStep | null;
+  features: AgentInboxFeatures;
   state: OnboardingState;
   agent: RelayAgent | null;
+  hostStatus: HostStatus | null;
+  /**
+   * The apps that signed in through the MCP server since the agent was made, while the API has seen no host:
+   * one of them is the host that came in. Only asked then.
+   */
+  signIns: SignIn[];
   /** Missing only when the session outlived its user; the pages have sent that visitor to sign in by then. */
   user: User | null;
+  /**
+   * Who the test step's inbound email was from, and what it was about, from this request's inbox read.
+   * Absent once that step is over. Not written to the operator's account.
+   */
+  testMail: { from: string; subject: string } | null;
 };
-
-/** How far apart the dashboard's clock and the API's may be when a time of one is held against the other's. */
-const CLOCK_SLACK_MS = 60_000;
-
-/**
- * Whether the agent was made while its operator was in the onboarding: after they first saw step 1.
- *
- * An agent that is older than that visit was there all along. Step 1 only showed because the agent
- * couldn't be found for a moment, and that doesn't put an agent that has long been in use through the steps.
- */
-export function wasMadeInTheSteps(agent: Pick<RelayAgent, 'createdAt'>, state: OnboardingState): boolean {
-  if (!state.startedAt) {
-    return false;
-  }
-
-  return !agent.createdAt || Date.parse(agent.createdAt) >= Date.parse(state.startedAt) - CLOCK_SLACK_MS;
-}
-
-/**
- * The step the operator is on. Nothing but the agent and the stored state decide it, so a refresh, another
- * browser and "Continue setup" all open the same one.
- *
- * An agent the steps never saw being made came from a terminal: claimed, or set up there after logging in.
- * It has its address and its host already, so there is nothing to walk its operator through.
- */
-export function resolveStep(agent: Pick<RelayAgent, 'createdAt'> | null, state: OnboardingState): SetupStep {
-  if (!agent) return 'address';
-  if (!wasMadeInTheSteps(agent, state)) return 'done';
-  if (!state.testLeftAt) return 'test';
-  if (!state.host) return 'connect';
-  if (!state.finishedAt) return 'reach';
-
-  return 'done';
-}
-
-/** The agent exists but no host reads its mail yet: what the "setup not finished" banners are about. */
-export function isSetupUnfinished(step: SetupStep): step is 'test' | 'connect' {
-  return step === 'test' || step === 'connect';
-}
 
 /**
  * The operator's progress, read once per request and shared by the shell and the page. Reading it also
  * lets it catch up with what happened since: see `catchUp`.
  */
 export const loadSetupProgress = cache(async (account: HumanAccount): Promise<SetupProgress> => {
-  const [user, agent] = await Promise.all([findCurrentUser(), getRelayAgent(account)]);
+  const [user, agent, features] = await Promise.all([findCurrentUser(), getRelayAgent(account), loadFeatures(account)]);
+  const hostStatus = agent ? await loadHostStatus(account) : null;
   if (!user) {
-    return { step: resolveStep(agent, {}), state: {}, agent, user };
+    return {
+      step: resolveStep(agent, {}, hostStatus),
+      sayHiStep: features.newOnboarding ? resolveSayHiStep(agent, {}, hostStatus) : null,
+      features,
+      state: {},
+      agent,
+      hostStatus,
+      signIns: [],
+      user,
+      testMail: null,
+    };
   }
 
-  const state = await catchUp(user, account, agent, readOnboardingState(user));
+  if (features.newOnboarding) {
+    return loadSayHiProgress(account, user, agent, hostStatus, features);
+  }
 
-  return { step: resolveStep(agent, state), state, agent, user };
+  const { state, testMail } = await catchUp(user, account, agent, readOnboardingState(user));
+  const step = resolveStep(agent, state, hostStatus);
+  // Step 3 waits for a host. One that signed in through the MCP server has come in, before the API sees it check.
+  const signIns =
+    step === 'connect' && agent ? (await listSignIns(account)).filter((signIn) => signedInSince(signIn.at, agent)) : [];
+
+  return {
+    step: signIns.length > 0 ? resolveStep(agent, state, hostStatus, true) : step,
+    sayHiStep: null,
+    features,
+    state,
+    agent,
+    hostStatus,
+    signIns,
+    user,
+    testMail,
+  };
 });
 
 /**
- * Brings the stored state up to date: the stand-ins that are due (`advanceMocks`), and a connector that
- * signed in to the account, which is a host that really connected. A state that can't be saved is tried
- * again on the next read, so a failure here never takes a page down.
+ * The progress of the onboarding where the agent says hi with its card. It has no test email to look out for:
+ * the agent says hi in its host instead. Until a host connects, an app that signed in through the MCP server
+ * since the agent was made is a host that came in, before the API sees it check.
+ */
+async function loadSayHiProgress(
+  account: HumanAccount,
+  user: User,
+  agent: RelayAgent | null,
+  hostStatus: HostStatus | null,
+  features: AgentInboxFeatures
+): Promise<SetupProgress> {
+  const state = readOnboardingState(user);
+  const waiting = resolveSayHiStep(agent, state, hostStatus);
+  const signIns =
+    agent && (waiting === 'host' || waiting === 'connect')
+      ? (await listSignIns(account)).filter((signIn) => signedInSince(signIn.at, agent))
+      : [];
+  const sayHiStep = signIns.length > 0 ? resolveSayHiStep(agent, state, hostStatus, true) : waiting;
+
+  return {
+    step: legacyStepOf(sayHiStep),
+    sayHiStep,
+    features,
+    state,
+    agent,
+    hostStatus,
+    signIns,
+    user,
+    testMail: null,
+  };
+}
+
+/**
+ * Brings the stored state up to date with mail that landed after the agent was created. Only the time is
+ * stored. Who sent it stays on `testMail` for this request, and only while the test step is still open.
+ * A state that can't be saved is tried again on the next read, so a failure here never takes a page down.
  */
 async function catchUp(
   user: User,
   account: HumanAccount,
   agent: RelayAgent | null,
   state: OnboardingState
-): Promise<OnboardingState> {
-  let next = advanceMocks(state) ?? state;
-
-  if (agent && isSetupUnfinished(resolveStep(agent, next)) && !next.host) {
-    const [tool] = await listConnectedTools(account);
-    if (tool) {
-      next = { ...next, host: { via: 'mcp', connectedAt: new Date().toISOString() } };
+): Promise<{ state: OnboardingState; testMail: SetupProgress['testMail'] }> {
+  let replyAt = state.testReplyAt;
+  let inbound: InboundEmail | null = null;
+  if (awaitsTestMail(agent, state)) {
+    const lookup = await readTestMail(account, agent, state);
+    if (lookup.ok) {
+      replyAt = lookup.inbound?.at;
+      inbound = lookup.inbound;
     }
   }
 
-  if (next === state) {
-    return state;
+  const saved = await saveProgress(user, state, rememberTestReply(state, replyAt));
+  if (!inbound || saved.testReplyAt !== inbound.at) {
+    return { state: saved, testMail: null };
+  }
+
+  return { state: saved, testMail: { from: inbound.from, subject: inbound.subject } };
+}
+
+/** Writes `next` when it differs from `before`. A failed write leaves `before` in place for the next read. */
+async function saveProgress(user: User, before: OnboardingState, next: OnboardingState): Promise<OnboardingState> {
+  if (next === before) {
+    return before;
   }
 
   try {
-    return await writeOnboardingState(user.id, state, next);
+    return await writeOnboardingState(user.id, before, next);
   } catch (error) {
     console.error('Failed to save the onboarding progress', error);
 
-    return state;
+    return before;
   }
 }
 
@@ -146,7 +238,7 @@ export async function noteOnboardingStarted(): Promise<void> {
 /**
  * Records that the operator's agent came from a terminal by way of a claim. Such an agent has its address
  * and its host, so the steps are over for it, even for an operator who had opened them before.
- * Like `noteHostConnected`, it never fails what it follows.
+ * Losing this note must not fail the claim it follows.
  */
 export async function noteAgentClaimed(user: User): Promise<void> {
   const state = readOnboardingState(user);
@@ -155,7 +247,6 @@ export async function noteAgentClaimed(user: User): Promise<void> {
   try {
     await writeOnboardingState(user.id, state, {
       ...state,
-      host: state.host ?? { via: 'cli', connectedAt: now },
       testLeftAt: state.testLeftAt ?? now,
       finishedAt: state.finishedAt ?? now,
     });
@@ -165,47 +256,39 @@ export async function noteAgentClaimed(user: User): Promise<void> {
 }
 
 /**
- * Records that a host connected to the operator's agent, the first time one does. Approving a CLI login
- * calls it: a terminal that was let into the account is a host. Losing this note must not fail the login
- * it comes from, so it never throws.
- */
-export async function noteHostConnected(user: User, via: HostVia): Promise<void> {
-  const state = readOnboardingState(user);
-  if (state.host) {
-    return;
-  }
-
-  try {
-    await writeOnboardingState(user.id, state, { ...state, host: { via, connectedAt: new Date().toISOString() } });
-  } catch (error) {
-    console.error('Failed to note the connected host', error);
-  }
-}
-
-/**
  * For a dashboard page: the operator's progress, once they may be there. Without an agent they belong in
- * the onboarding, and so do they in the middle of it, until they choose "Skip for now".
+ * the onboarding, and so do they in the middle of it, until they choose "Skip for now". `connect` is a host
+ * the page was asked to connect (`?connect=codex`), which the onboarding's "Connect" step then starts on.
  */
-export async function requireSetUpAgent(account: HumanAccount): Promise<SetupProgress & { agent: RelayAgent }> {
+export async function requireSetUpAgent(
+  account: HumanAccount,
+  connect: HostId | null = null
+): Promise<SetupProgress & { agent: RelayAgent }> {
   const progress = await loadSetupProgress(account);
-  const { agent } = progress;
+  const { agent, step, state } = progress;
 
-  if (!agent || (isSetupUnfinished(progress.step) && !progress.state.skippedAt)) {
-    redirect(ONBOARDING_PATH);
+  if (!agent || belongsInOnboarding(agent, step, state)) {
+    redirect(connect ? onboardingConnectPath(connect) : ONBOARDING_PATH);
   }
 
   return { ...progress, agent };
 }
 
 /** What the onboarding page keeps asking for, to notice a change it has to show. Cheap to work out. */
-export function describeProgress({ step, state, agent }: SetupProgress): string {
+export function describeProgress({ step, sayHiStep, state, agent, hostStatus }: SetupProgress): string {
   return [
     step,
+    sayHiStep,
     agent?.id,
+    agent?.cardShown?.at,
+    hostStatus?.cardShown?.at,
+    state.hostPickedAt,
     state.testSentAt,
     state.testReplyAt,
-    state.host?.connectedAt,
-    state.host?.readAt,
+    agent && state.testLeftAt && !hostStatus ? 'host-status-unavailable' : '',
+    hostStatus?.connected ? 'connected' : '',
+    ...(hostStatus?.hosts ?? []).map((host) => `${host.via}:${host.connectedAt}`),
+    hostStatus?.waitingMessage?.seenAt,
     state.skippedAt,
   ]
     .map((part) => part ?? '')
@@ -223,15 +306,29 @@ export type AgentIdentity = {
   createdAt?: string;
 };
 
-/** The part of the agent's address before the `@`: the one picked on step 1, or one made from its name. */
-export function handleOf(agent: RelayAgent, state: OnboardingState): string {
-  return state.handle || toHandle(agent.name) || 'agent';
+/**
+ * A short name for sentences and the connect prompt. The mailbox local-part wins, so an edited
+ * address stays the one the card, the link and `connect` use. Otherwise the name, then a handle
+ * left over from an older step 1.
+ */
+export function handleOf(agent: RelayAgent, state: OnboardingState, emailAddress?: string): string {
+  return inboxHandleOf(emailAddress) || toHandle(agent.name) || state.handle || 'agent';
+}
+
+/** The part of an inbox address before `@`, when it is itself a handle. */
+export function inboxHandleOf(emailAddress: string | undefined): string | undefined {
+  const local = emailAddress?.split('@')[0]?.trim().toLowerCase();
+  if (!local || toHandle(local) !== local) {
+    return undefined;
+  }
+
+  return local;
 }
 
 /**
- * How the agent is addressed. The address is the one the API gave it; while the API can't take the one
- * picked on step 1 (NV-9032), an agent without an inbox of its own shows the picked one instead. Its card
- * is on the site `origin` names (`readSiteOrigin`).
+ * How the agent is addressed. `emailAddress` is the Agent Email Inbox the API assigned. Empty when that
+ * inbox could not be read: the pages say it isn't ready rather than inventing `{name}@agentinbox.md`.
+ * Its card is on the site `origin` names (`readSiteOrigin`).
  */
 export function describeAgentIdentity(
   agent: RelayAgent,
@@ -240,12 +337,12 @@ export function describeAgentIdentity(
   emailAddress?: string
 ): AgentIdentity {
   const name = agent.name && agent.name !== DEFAULT_AGENT_NAME ? agent.name : 'Your agent';
-  const handle = handleOf(agent, state);
+  const handle = handleOf(agent, state, emailAddress);
 
   return {
     name,
     handle,
-    address: emailAddress ?? addressOf(handle),
+    address: emailAddress ?? '',
     cardLink: cardLinkOf(origin, handle),
     pictureUrl: agent.pictureUrl,
     createdAt: agent.createdAt,
@@ -273,14 +370,14 @@ export async function loadSetupSummary(
   const { state, agent, step } = progress;
   const [channels, waiting, origin] = await Promise.all([
     loadChannelFacts(account),
-    countWaitingMessages(account, state),
+    countWaitingMessages(account),
     readSiteOrigin(),
   ]);
 
   return {
     step,
     agent: describeAgentIdentity(agent, state, origin, channels.emailAddress),
-    waiting,
+    waiting: waiting ?? 0,
     secondChannelConnected: channels.telegram || channels.slack,
     wentThroughSteps: wasMadeInTheSteps(agent, state),
     doneBannerDismissed: state.doneBannerDismissed === true,
@@ -295,44 +392,212 @@ export type OnboardingView = {
   operator: { email: string | null; firstName: string | null };
   /** Missing on step 1, where the agent is still being named. */
   agent: AgentIdentity | null;
-  test: { sentAt?: string; replyAt?: string };
-  host: OnboardingState['host'] | null;
-  waiting: number;
-  /** The one-time code in the prompt of step 3. */
-  connectCode: string;
+  test: { sentAt?: string; replyAt?: string; from?: string; subject?: string };
+  host: { via: 'cli' | 'mcp'; connectedAt: string } | null;
+  /** True when an agent may already be connected but its host status could not be checked. */
+  hostStatusUnavailable: boolean;
+  waitingMessage: HostStatus['waitingMessage'];
+  /** `null` when the unread count could not be checked. */
+  waiting: number | null;
+  /** The Agent Inbox API (`readApiUrl`), named by the connect command of step 3 and the channel prompts of step 4. */
+  apiUrl: string;
+  /** The hosted MCP server the chat apps of step 3 connect to, or `null` while there is none. */
+  mcpUrl: string | null;
+  /** The apps that signed in through the MCP server since the agent was made, which step 3's picker ticks. */
+  connectedTools: ToolId[];
   channels: { telegram: boolean; slack: boolean };
+  /** What the Telegram and Slack drawers of step 4 open with. `null` on the other steps. */
+  channelSetup: OnboardingChannelSetup | null;
   /** Who can reach the agent, for the Share dialog of step 4. `null` while there is no agent, or it couldn't be read. */
   reach: AgentReach | null;
   /** Where the dashboard is served (`readSiteOrigin`): the card link the steps show before there is an agent. */
   origin: string;
+  /** Mailbox domain the API publishes, such as `dev.agentinbox.md`. The address step shows this before an inbox exists. */
+  mailDomain: string;
+};
+
+/** What the Configure page hands its Telegram and Slack drawers, for the same drawers in step 4. */
+export type OnboardingChannelSetup = {
+  /** How far each setup got, so its drawer opens where it was left. `unknown` when it couldn't be read. */
+  telegram: TelegramSetupState;
+  slack: SlackSetupState;
+  /** What the Slack app is called until the operator names it. */
+  slackAppName: string;
+  /** What the operator hands their own agent in each drawer. */
+  prompts: Record<'telegram' | 'slack', string>;
 };
 
 /** What the onboarding page renders. `null` once there is nothing left to walk the operator through. */
 export async function loadOnboardingView(account: HumanAccount): Promise<OnboardingView | null> {
   const progress = await loadSetupProgress(account);
-  const { step, state, agent, user } = progress;
+  const { step, state, agent, hostStatus, signIns, user } = progress;
   if (step === 'done' || !user) {
     return null;
   }
 
-  const [channels, waiting] = agent
-    ? await Promise.all([loadChannelFacts(account), countWaitingMessages(account, state)])
-    : [{ telegram: false, slack: false, emailAddress: undefined }, 0];
-  const origin = await readSiteOrigin();
+  const [channels, waiting, setups] = agent
+    ? await Promise.all([
+        loadChannelFacts(account),
+        countWaitingMessages(account),
+        step === 'reach' ? loadChannelSetups(account) : null,
+      ])
+    : [{ telegram: false, slack: false, emailAddress: undefined }, 0, null];
+  const mcpUrl = readMcpUrl();
+  const [origin, mailDomain] = await Promise.all([readSiteOrigin(), readInboxMailDomain(account)]);
+  // Only an app that signed in since the agent was made is ticked; one that did would have moved the steps on.
+  const connectedTools = signIns.map((signIn) => signIn.id).filter(isToolId);
+  const host = hostStatus?.hosts.reduce<(typeof hostStatus.hosts)[number] | null>(
+    (earliest, entry) => (!earliest || entry.connectedAt < earliest.connectedAt ? entry : earliest),
+    null
+  );
+  // Until the API sees a host check, the first app that signed in through the MCP server is the one that came in.
+  const signedIn = signIns.reduce<SignIn | null>(
+    (earliest, signIn) => (!earliest || signIn.at < earliest.at ? signIn : earliest),
+    null
+  );
+  const identity = agent && describeAgentIdentity(agent, state, origin, channels.emailAddress);
+  const apiUrl = await readApiUrl();
 
   return {
     step,
     status: describeProgress(progress),
     operator: { email: user.primaryEmailAddress?.emailAddress ?? null, firstName: user.firstName },
-    agent: agent && describeAgentIdentity(agent, state, origin, channels.emailAddress),
-    test: { sentAt: state.testSentAt, replyAt: state.testReplyAt },
-    host: state.host ?? null,
+    agent: identity,
+    test: {
+      sentAt: state.testSentAt,
+      replyAt: state.testReplyAt,
+      from: progress.testMail?.from,
+      subject: progress.testMail?.subject,
+    },
+    host: host
+      ? { via: host.via, connectedAt: host.connectedAt }
+      : signedIn
+        ? { via: 'mcp', connectedAt: signedIn.at }
+        : null,
+    hostStatusUnavailable: Boolean(agent && state.testLeftAt && !hostStatus),
+    waitingMessage: hostStatus?.waitingMessage ?? null,
     waiting,
-    connectCode: connectCode(user.id),
+    apiUrl,
+    mcpUrl,
+    connectedTools,
     channels: { telegram: channels.telegram, slack: channels.slack },
+    channelSetup:
+      agent && identity && setups
+        ? {
+            ...setups,
+            slackAppName: agentDisplayName(agent),
+            prompts: {
+              telegram: buildChannelPrompt({ apiUrl }, 'telegram', identity.handle),
+              slack: buildChannelPrompt({ apiUrl }, 'slack', identity.handle),
+            },
+          }
+        : null,
     reach: agent?.settings?.reach ?? null,
     origin,
+    mailDomain,
   };
+}
+
+/**
+ * What the onboarding where the agent says hi shows (`A.1` to `A.4`). `null` once it has nothing left to show:
+ * the operator opened the inbox, or the agent came from a terminal.
+ */
+export type SayHiView = {
+  step: Exclude<SayHiStep, 'done'>;
+  /** `describeProgress` of what this view shows, which the page polls for a change. */
+  status: string;
+  operator: { email: string | null; firstName: string | null };
+  /** Missing on A.1, where the agent is still being named. */
+  agent: (AgentIdentity & { look: AgentLook }) | null;
+  /** The host picked on A.2, which A.3 opens on. `null` before one was picked. */
+  pickedHost: HostId | null;
+  /** The host that came in first, and the way it came: what A.4a asks to say hi. `null` before one did. */
+  connected: { via: 'cli' | 'mcp'; host: HostId | null } | null;
+  /** The first time a host showed the card, and which: what A.4 shows happening. `null` before. */
+  cardShown: CardShown | null;
+  /** Messages already in the inbox, waiting for a host to read them. `null` when they couldn't be counted. */
+  waiting: number | null;
+  apiUrl: string;
+  mcpUrl: string | null;
+  /** The apps that signed in through the MCP server since the agent was made. */
+  connectedTools: ToolId[];
+  /** Who can reach the agent, for the Share dialog of A.4. `null` when it couldn't be read. */
+  reach: AgentReach | null;
+  origin: string;
+  mailDomain: string;
+};
+
+export async function loadSayHiView(account: HumanAccount): Promise<SayHiView | null> {
+  const progress = await loadSetupProgress(account);
+  const { sayHiStep, state, agent, hostStatus, signIns, user } = progress;
+  if (!sayHiStep || sayHiStep === 'done' || !user) {
+    return null;
+  }
+
+  const [channels, waiting, origin, mailDomain, apiUrl] = await Promise.all([
+    agent ? loadChannelFacts(account) : { telegram: false, slack: false, emailAddress: undefined },
+    agent ? countWaitingMessages(account) : 0,
+    readSiteOrigin(),
+    readInboxMailDomain(account),
+    readApiUrl(),
+  ]);
+  const first = hostStatus?.hosts.reduce<(typeof hostStatus.hosts)[number] | null>(
+    (earliest, entry) => (!earliest || entry.connectedAt < earliest.connectedAt ? entry : earliest),
+    null
+  );
+  const signedIn = signIns.reduce<SignIn | null>(
+    (earliest, signIn) => (!earliest || signIn.at < earliest.at ? signIn : earliest),
+    null
+  );
+  const identity = agent ? describeAgentIdentity(agent, state, origin, channels.emailAddress) : null;
+
+  return {
+    step: sayHiStep,
+    status: describeProgress(progress),
+    operator: { email: user.primaryEmailAddress?.emailAddress ?? null, firstName: user.firstName },
+    agent: identity && agent ? { ...identity, look: agent.look } : null,
+    pickedHost: state.pickedHost ?? null,
+    connected: first ? { via: first.via, host: first.id ?? null } : signedIn ? { via: 'mcp', host: signedIn.id } : null,
+    cardShown: agent?.cardShown ?? hostStatus?.cardShown ?? null,
+    waiting,
+    apiUrl,
+    mcpUrl: readMcpUrl(),
+    connectedTools: signIns.map((signIn) => signIn.id).filter(isToolId),
+    reach: agent?.settings?.reach ?? null,
+    origin,
+    mailDomain,
+  };
+}
+
+/** The domain new inboxes are created on. The production domain stands in when the API has not published one. */
+async function readInboxMailDomain(account: HumanAccount): Promise<string> {
+  try {
+    const result = await requestForAccount<{ domain?: string }>(account, '/v1/human/inbox-address');
+    const domain = result.domain?.trim().toLowerCase();
+    if (domain && !/[\s@]/.test(domain) && domain.includes('.')) {
+      return domain;
+    }
+  } catch {
+    // The address preview keeps the production domain when this call cannot be made.
+  }
+
+  return AGENT_DOMAIN;
+}
+
+/**
+ * The Telegram and Slack setups, read as the Configure page reads them. They are a detail of step 4: when
+ * they can't be read, the drawers find out for themselves once they open.
+ */
+async function loadChannelSetups(account: HumanAccount): Promise<Pick<OnboardingChannelSetup, 'telegram' | 'slack'>> {
+  try {
+    const { telegramSetup, slackSetup } = await loadChannelsOverview(account);
+
+    return { telegram: telegramSetup, slack: slackSetup };
+  } catch (error) {
+    console.error('Failed to read the channel setups for the onboarding', error);
+
+    return { telegram: { step: 'unknown' }, slack: { step: 'unknown' } };
+  }
 }
 
 async function loadChannelFacts(account: HumanAccount) {
@@ -354,22 +619,85 @@ async function loadChannelFacts(account: HumanAccount) {
   }
 }
 
-/**
- * How many messages wait for a host: the unread threads of the inbox, plus the stand-in reply to the test
- * email (NV-9032) until a host has read it.
- */
-async function countWaitingMessages(account: HumanAccount, state: OnboardingState): Promise<number> {
-  const mockReply = state.testReplyAt && !state.host?.readAt ? 1 : 0;
-
+/** How many messages wait for a host: the unread threads of the inbox. */
+async function countWaitingMessages(account: HumanAccount): Promise<number | null> {
   try {
     const counts = await requestForAccount<{ tabs?: { unread?: number } }>(account, '/v1/human/inbox/counts', {
       query: { senders: 'all' },
     });
 
-    return (counts?.tabs?.unread ?? 0) + mockReply;
+    return counts?.tabs?.unread ?? 0;
   } catch (error) {
     console.error('Failed to count the waiting messages', error);
 
-    return mockReply;
+    return null;
   }
+}
+
+/**
+ * The newest human email after the agent was created. A failed read leaves the stored time alone, so the
+ * step stays passed and this request shows no sender. With no time to measure from, nothing is recorded.
+ */
+async function readTestMail(
+  account: HumanAccount,
+  agent: RelayAgent | null,
+  state: OnboardingState
+): Promise<{ ok: true; inbound: InboundEmail | null } | { ok: false }> {
+  const floor = agent?.createdAt ?? state.startedAt;
+  if (!agent || !floor) {
+    return { ok: true, inbound: null };
+  }
+
+  try {
+    return { ok: true, inbound: await findInboundEmail(account, floor) };
+  } catch (error) {
+    console.error('Failed to look for inbound email', error);
+
+    return { ok: false };
+  }
+}
+
+/**
+ * The newest human email after `floor`. The newest page is enough: a message that arrives while the
+ * operator is on this step is at the top. The agent's own test email is from the agent, so it does not count.
+ */
+async function findInboundEmail(account: HumanAccount, floor: string): Promise<InboundEmail | null> {
+  const sinceMs = Date.parse(floor);
+  if (!Number.isFinite(sinceMs)) {
+    return null;
+  }
+
+  const page = await listInboxThreads(account, { tab: 'all', channel: 'email' });
+  let newest = newestInboundEmail(page.threads, sinceMs);
+
+  for (const thread of page.threads) {
+    if (!activityIsAfter(thread.lastActivityAt, sinceMs)) {
+      break;
+    }
+
+    // This thread's latest message is already the newest human email on the page. Older threads cannot beat it.
+    if (humanMessageAfter(thread.lastMessage, sinceMs)) {
+      break;
+    }
+
+    const at = await latestHumanInThread(account, thread, sinceMs);
+    if (!at) {
+      continue;
+    }
+
+    newest = preferNewerInbound(newest, inboundEmailFrom(thread, at));
+  }
+
+  return newest;
+}
+
+/** A human message inside the thread, for when the agent wrote something after it. */
+async function latestHumanInThread(
+  account: HumanAccount,
+  thread: InboxThread,
+  sinceMs: number
+): Promise<string | null> {
+  const view = await getInboxThread(account, thread.id);
+
+  return latestHumanMessageAt(view.messages, sinceMs);
 }

@@ -8,11 +8,11 @@ import {
   listAgentIntegrations,
   listIntegrations,
 } from '../../api/setup';
-import { info, promptLine, promptSecret, success } from '../../cli-io';
+import { info, promptLine, promptPick, promptSecret, success } from '../../cli-io';
 import { openInBrowser } from '../../open-browser';
 import { SetupStillPendingError } from '../../output';
 import { renderQR } from '../../qr';
-import { openedScreen, type ScreenRow } from '../../screen/screen';
+import { type AskOptions, openedScreen, type PickOptions, type ScreenRow } from '../../screen/screen';
 import { SETUP_PAGE_POLL_TIMEOUT_MS, type SetupPageOutcome } from '../link-channel';
 
 /** Terminal/browser side effects, injectable so the connect flows are unit-testable. */
@@ -20,9 +20,11 @@ export interface SetupIo {
   isTTY: boolean;
   write: (text: string) => void;
   openInBrowser: (url: string) => void;
-  prompt: (question: string) => Promise<string>;
+  prompt: (question: string, options?: AskOptions) => Promise<string>;
   /** Same as `prompt`, but the answer is not echoed — for pasted credentials. */
   promptSecret: (question: string) => Promise<string>;
+  /** Asks for one of a few: picked with the arrow keys on the command's screen, typed where it has none. */
+  pick: <Choice extends string>(question: string, options: PickOptions<Choice>) => Promise<Choice>;
 }
 
 /** Where the person supplies Telegram or Slack credentials. */
@@ -42,8 +44,10 @@ export interface SetupPageHandoff {
 }
 
 export const defaultSetupIo: SetupIo = {
-  isTTY: Boolean(process.stdin.isTTY),
-  // Under the command's screen, where it has one, until the screen next changes: menus and how-tos.
+  get isTTY() {
+    return Boolean(process.stdin.isTTY);
+  },
+  // With the next question on the command's screen, where it has one: menus and how-tos.
   write: (text) => {
     const screen = openedScreen();
     if (screen) {
@@ -55,6 +59,7 @@ export const defaultSetupIo: SetupIo = {
   openInBrowser,
   prompt: promptLine,
   promptSecret,
+  pick: promptPick,
 };
 
 /**

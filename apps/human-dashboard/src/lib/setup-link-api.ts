@@ -5,9 +5,17 @@ import {
   safeJson,
   unwrapData,
 } from './api-response';
+import { type MascotLook, mascotLookOf } from './look';
 import type { InactiveSetupReason, SetupChannel } from './setup-link';
 
-export type SetupLinkStatus = { valid: true; agentName?: string } | { valid: false; reason: InactiveSetupReason };
+export type SetupLinkStatus =
+  | {
+      valid: true;
+      agentName?: string;
+      /** The agent's look, for its mascot on the page. Missing while its mascots show as they always have. */
+      agentLook?: MascotLook;
+    }
+  | { valid: false; reason: InactiveSetupReason };
 
 export type TelegramSetupResult = {
   botUsername: string;
@@ -46,10 +54,8 @@ export async function getSetupLinkStatus(
   token: string,
   signal?: AbortSignal
 ): Promise<SetupLinkStatus> {
-  const path =
-    channel === 'slack' ? '/v1/agents/public/slack/setup/status' : '/v1/integrations/mobile-configure/status';
   const data = await request(
-    `${apiUrl}${path}?token=${encodeURIComponent(token)}`,
+    `${apiUrl}/v1/channels/${channel}/setup?token=${encodeURIComponent(token)}`,
     { method: 'GET', signal },
     'Could not verify the setup link.'
   );
@@ -63,7 +69,7 @@ export async function submitTelegramSetup(
   botToken: string
 ): Promise<TelegramSetupResult> {
   const data = await request(
-    `${apiUrl}/v1/integrations/mobile-configure`,
+    `${apiUrl}/v1/channels/telegram/setup`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -80,7 +86,7 @@ export async function submitTelegramSetup(
 
 export async function submitSlackSetup(apiUrl: string, token: string, configToken: string): Promise<SlackSetupResult> {
   const data = await request(
-    `${apiUrl}/v1/agents/public/slack/setup`,
+    `${apiUrl}/v1/channels/slack/setup`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -117,8 +123,13 @@ function asStatus(data: JsonBody): SetupLinkStatus {
   }
 
   const agentName = data.agentName;
+  const agentLook = mascotLookOf(data.agentLook);
 
-  return { valid: true, ...(typeof agentName === 'string' && agentName ? { agentName } : {}) };
+  return {
+    valid: true,
+    ...(typeof agentName === 'string' && agentName ? { agentName } : {}),
+    ...(agentLook ? { agentLook } : {}),
+  };
 }
 
 function stringField(data: JsonBody, key: string): string | undefined {

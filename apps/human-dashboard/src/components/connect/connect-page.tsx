@@ -4,9 +4,10 @@ import { ArrowUpRight } from 'lucide-react';
 import { type ReactNode, useEffect, useId, useState } from 'react';
 
 import { AppIcon } from '@/components/invite/app-icon';
+import { AgentLookProvider, AgentMascot } from '@/components/ui/agent-look';
 import { Button, buttonClassName } from '@/components/ui/button';
-import { MascotFace } from '@/components/ui/mascot-face';
 import { useMeasuredHeight } from '@/hooks/use-measured-height';
+import type { MascotLook } from '@/lib/look';
 import {
   type InactiveSetupReason,
   parseTelegramCredential,
@@ -46,6 +47,8 @@ type ConnectPageProps = {
  */
 export function ConnectPage({ apiUrl, channel }: ConnectPageProps) {
   const [view, setView] = useState<ConnectView>({ kind: 'loading' });
+  // Whose setup this is, for the mascot once it's done. The link's status says; the views after it don't.
+  const [agentLook, setAgentLook] = useState<MascotLook>();
 
   useEffect(() => {
     const token = readSetupToken(window.location.hash);
@@ -69,6 +72,7 @@ export function ConnectPage({ apiUrl, channel }: ConnectPageProps) {
           return;
         }
 
+        setAgentLook(status.agentLook);
         setView({ kind: 'form', agentName: status.agentName });
       })
       .catch((error: unknown) => {
@@ -96,8 +100,10 @@ export function ConnectPage({ apiUrl, channel }: ConnectPageProps) {
           onSlackSuccess={(result) => setView({ kind: 'slack-success', result })}
         />
       )}
-      {view.kind === 'telegram-success' && <TelegramSuccess result={view.result} />}
-      {view.kind === 'slack-success' && <SlackSuccess result={view.result} />}
+      <AgentLookProvider look={agentLook}>
+        {view.kind === 'telegram-success' && <TelegramSuccess result={view.result} />}
+        {view.kind === 'slack-success' && <SlackSuccess result={view.result} />}
+      </AgentLookProvider>
     </ConnectCard>
   );
 }
@@ -137,17 +143,17 @@ function inactiveCopy(channel: SetupChannel, reason: InactiveSetupReason): { tit
     case 'expired':
       return {
         title: 'This setup link has expired',
-        text: `Setup links time out after a while. Back in your terminal, run ${command} again for a fresh link.`,
+        text: `Setup links time out after a while. Ask your agent for a fresh link, or run ${command} again.`,
       };
     case 'used':
       return {
         title: 'This setup link was already used',
-        text: `Each link works once. If ${connected}, check your terminal. Otherwise run ${command} again for a fresh link.`,
+        text: `Each link works once. If ${connected}, you're all set. Otherwise ask your agent for a fresh link, or run ${command} again.`,
       };
     case 'invalid':
       return {
         title: 'This setup link is not valid',
-        text: `The link may be incomplete or was made for a different environment. Run ${command} again for a fresh link.`,
+        text: `The link may be incomplete or was made for a different environment. Ask your agent for a fresh link, or run ${command} again.`,
       };
     default: {
       const exhaustive: never = reason;
@@ -296,8 +302,8 @@ function ChannelIntro({ channel, agentName }: { channel: SetupChannel; agentName
             Your workspace, <Accent>one token</Accent>
           </h1>
           <CardText>
-            {who} will reach you in Slack through an app created in your workspace. The token never goes through the
-            terminal.
+            {who} will reach you in Slack through an app created in your workspace. The token never goes through your
+            chat or terminal.
           </CardText>
         </div>
       </>
@@ -414,32 +420,35 @@ function PasteField({
 
 function TelegramSuccess({ result }: { result: TelegramSetupResult }) {
   const name = result.botUsername ? `@${result.botUsername}` : 'Your bot';
-  const deepLink = result.deepLinkUrl || (result.botUsername ? `https://t.me/${result.botUsername}` : '');
+  // Only this link tells the bot who pressed Start. From the bot's plain address, Start connects nobody.
+  const { deepLinkUrl } = result;
 
   return (
     <>
-      <MascotFace art="waiting" mood="happy" className="size-35" />
+      <AgentMascot art="waiting" mood="happy" className="size-35" />
       <h1 className="text-2xl leading-7.5 tracking-[-0.02em]">
         <span className="font-mono text-[22px]">{name}</span> is <Accent>wired up</Accent>
       </h1>
       <CardText>
-        {deepLink ? (
+        {deepLinkUrl ? (
           <>
             One last tap: open the bot in Telegram and press{' '}
-            <strong className="font-medium text-foreground">Start</strong> so it knows it&apos;s you. Your terminal
-            confirms as soon as it sees you.
+            <strong className="font-medium text-foreground">Start</strong> so it knows it&apos;s you. That finishes the
+            setup.
           </>
         ) : (
-          'The bot is saved. Open it in Telegram and press Start. Your terminal confirms as soon as it sees you.'
+          'The bot is saved. Go back to your agent or your terminal for the link that connects you.'
         )}
       </CardText>
-      {deepLink && (
-        <a href={deepLink} target="_blank" rel="noreferrer" className={buttonClassName('primary', 'w-full')}>
+      {deepLinkUrl && (
+        <a href={deepLinkUrl} target="_blank" rel="noreferrer" className={buttonClassName('primary', 'w-full')}>
           Connect & test
           <ArrowUpRight aria-hidden="true" className="size-3.5" />
         </a>
       )}
-      <p className="text-xs leading-4 text-muted">After you tap Start you can close this tab.</p>
+      <p className="text-xs leading-4 text-muted">
+        {deepLinkUrl ? 'After you tap Start you can close this tab.' : 'You can close this tab.'}
+      </p>
     </>
   );
 }
@@ -447,14 +456,14 @@ function TelegramSuccess({ result }: { result: TelegramSetupResult }) {
 function SlackSuccess({ result }: { result: SlackSetupResult }) {
   return (
     <>
-      <MascotFace art="waiting" mood="happy" className="size-35" />
+      <AgentMascot art="waiting" mood="happy" className="size-35" />
       <h1 className="text-2xl leading-7.5 tracking-[-0.02em]">
         Add it to <Accent>your workspace</Accent>
       </h1>
       <CardText>
         {result.authorizeUrl
-          ? 'One last step: install the app so Slack knows it is you. Your terminal confirms as soon as it sees the install.'
-          : 'The Slack app is created. Return to your terminal — it will finish the install from there.'}
+          ? 'One last step: install the app so Slack knows it is you. That finishes the setup.'
+          : 'The Slack app is created. Go back to your agent or your terminal to finish the install.'}
       </CardText>
       {result.authorizeUrl && (
         <a href={result.authorizeUrl} target="_blank" rel="noreferrer" className={buttonClassName('primary', 'w-full')}>

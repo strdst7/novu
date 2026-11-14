@@ -1,18 +1,18 @@
-import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 import pc from 'picocolors';
-import { setupRelay } from '../api/agent-inbox';
+import { lookToKeep, savedLook } from '../agent-look';
 import { type ApiClient, createApiClient } from '../api/client';
 import {
   checkLoginRequest,
-  findOperator,
   getKeylessClaimToken,
   hasSubscriber,
   type LoginRequest,
   type LoginRequestStatus,
+  type OperatorAnswer,
+  readOperator,
   startLoginRequest,
 } from '../api/login';
-import { info, promptLine, success } from '../cli-io';
+import { info, success } from '../cli-io';
 import {
   type CliConfig,
   configPath,
@@ -21,13 +21,13 @@ import {
   resolveTargetApiUrl,
   saveConfig,
 } from '../config';
+import { keptHost } from '../host';
 import { openInBrowser } from '../open-browser';
 import { sleep } from '../poll';
 import { openedScreen, openScreen } from '../screen/screen';
 import { startWaitIndicator } from '../spinner';
 import { failOnScreen } from './failure';
 import { handleError } from './interact';
-import { splitName } from './invite';
 
 interface LoginOptions {
   apiUrl?: string;
@@ -37,8 +37,6 @@ export interface LoginResult {
   config: CliConfig;
   /** The Agent Inbox account's email, when the website passed it on. */
   email?: string;
-  /** The name on the Agent Inbox account, when the website passed it on. */
-  name?: { firstName: string; lastName?: string };
   /** The operator on this computer still reaches the same contact and channels after logging in. */
   keptSetup: boolean;
 }
@@ -56,7 +54,7 @@ const MACHINE_NAME_MAX_LENGTH = 64;
 const MAX_WAIT_MS = 60 * 60 * 1000;
 
 export async function loginCommand(options: LoginOptions): Promise<never> {
-  const screen = await openScreen({ command: 'login' });
+  const screen = await openScreen({ command: 'login', look: savedLook({ apiUrl: options.apiUrl }) });
 
   try {
     const result = await runLogin(options);
@@ -70,15 +68,7 @@ export async function loginCommand(options: LoginOptions): Promise<never> {
     }
     success(`Saved to ${configPath()}.`);
 
-    let { config } = result;
-    let isNewContact = false;
-
-    // Asked only now that the key is saved, so stopping at the question loses nothing.
-    if (!config.subscriberId) {
-      ({ config, isNewContact } = await introduceYourself(result));
-    }
-
-    const nextStep = describeNextStep({ config, keptSetup: result.keptSetup, isNewContact });
+    const nextStep = describeNextStep(result);
     if (screen) {
       screen.add({ mark: 'next', value: nextStep });
     } else {
@@ -132,27 +122,30 @@ export async function runLogin(options: LoginOptions): Promise<LoginResult> {
   // Who agents on this computer reach by default is the contact the account has for its owner, so "you" is
   // one person here, on the dashboard and on any other computer. The key is handed over only once, so a
   // failed lookup must not fail the login.
-  const operatorId = await findOperator(client).catch(() => undefined);
+  const operator = await readOperator(client).catch((): OperatorAnswer => ({}));
+  const operatorId = operator.subscriberId || undefined;
   const keptSetup = await isStillYou(client, savedId, operatorId);
+  const auth: CliConfig['auth'] = { mode: 'apiKey', secretKey: approved.apiKey };
+  const relayAgentIdentifier = current?.relayAgentIdentifier ?? DEFAULT_RELAY_AGENT_IDENTIFIER;
+  // The account answers for the agent it sets up by default, which is the one this computer acts as unless
+  // `setup --agent-identifier` named another.
+  const answeredLook = relayAgentIdentifier === DEFAULT_RELAY_AGENT_IDENTIFIER ? operator.agentLook : undefined;
 
   const config: CliConfig = {
     apiUrl,
-    auth: { mode: 'apiKey', secretKey: approved.apiKey },
-    relayAgentIdentifier: current?.relayAgentIdentifier ?? DEFAULT_RELAY_AGENT_IDENTIFIER,
+    auth,
+    relayAgentIdentifier,
     // The default channel saved here is that contact's own preference, so it only stays with them.
     ...(keptSetup ? { subscriberId: savedId, defaultChannel: current?.defaultChannel } : {}),
     ...(operatorId && !keptSetup ? { subscriberId: operatorId } : {}),
+    ...keptHost(existing, apiUrl),
+    ...lookToKeep({ apiUrl, auth, relayAgentIdentifier }, existing, answeredLook),
   };
   saveConfig(config);
+  // The account's agent is known now, so the mascot is its own; an account with none yet keeps the orb.
+  openedScreen()?.look(config.look);
 
-  const { email, firstName, lastName } = approved.user ?? {};
-
-  return {
-    config,
-    email: email ?? undefined,
-    ...(firstName ? { name: { firstName, ...(lastName ? { lastName } : {}) } } : {}),
-    keptSetup,
-  };
+  return { config, email: approved.user?.email ?? undefined, keptSetup };
 }
 
 /** Where to log in and the code to check there: on the command's screen, or printed as always. */
@@ -203,65 +196,17 @@ async function isStillYou(
   return hasSubscriber(client, savedId).catch(() => true);
 }
 
-/**
- * The account has no contact for its owner yet, so agents on this computer would have nobody to reach.
- * Asks who that is, makes the contact the way `npx @agentinbox/cli setup` and the dashboard do, and saves it as who this
- * computer reaches. Where there is no terminal to ask in, the name on the Agent Inbox account is used. The login
- * is saved by now, so failing here only leaves this step to `npx @agentinbox/cli setup`.
- * `isNewContact` tells a contact made here from one the account turned out to have after all.
- */
-export async function introduceYourself(
-  { config, name }: Pick<LoginResult, 'config' | 'name'>,
-  io: { isTTY: boolean; prompt: (question: string) => Promise<string> } = {
-    isTTY: Boolean(process.stdin.isTTY),
-    prompt: promptLine,
-  }
-): Promise<{ config: CliConfig; isNewContact: boolean }> {
-  const accountName = [name?.firstName, name?.lastName].filter(Boolean).join(' ');
-  const answer = io.isTTY
-    ? await io.prompt(
-        `Who are you? Your name, as agents will see it${accountName ? ` [${accountName}]` : ' (optional)'}: `
-      )
-    : '';
-  // Only a suggestion: an owner the account already knows wins, and is what comes back.
-  const suggestedId = `operator_${randomBytes(6).toString('hex')}`;
-
-  try {
-    const client = createApiClient({ apiUrl: config.apiUrl, secretKey: config.auth.secretKey });
-    const relay = await setupRelay(client, {
-      subscriberId: suggestedId,
-      operator: true,
-      agentIdentifier: config.relayAgentIdentifier,
-      ...splitName(answer.trim() || accountName),
-    });
-    const subscriberId = relay.subscriberId || suggestedId;
-    const introduced: CliConfig = { ...config, subscriberId };
-    saveConfig(introduced);
-
-    return { config: introduced, isNewContact: subscriberId === suggestedId };
-  } catch (err) {
-    info(`Couldn't save who you are just now (${err instanceof Error ? err.message : String(err)}).`);
-
-    return { config, isNewContact: false };
-  }
-}
-
 /** What to do after logging in, which depends on whether agents on this computer know who to reach. */
-export function describeNextStep({
-  config,
-  keptSetup,
-  isNewContact = false,
-}: Pick<LoginResult, 'config' | 'keptSetup'> & { isNewContact?: boolean }): string {
+export function describeNextStep({ config, keptSetup }: Pick<LoginResult, 'config' | 'keptSetup'>): string {
   if (keptSetup) {
     return 'Your agents on this computer keep reaching you as before.';
   }
 
-  // A contact made a moment ago has no channel yet; one the account already had may have some.
-  if (config.subscriberId && !isNewContact) {
+  if (config.subscriberId) {
     return `Agents on this computer now reach you on your account's channels. None connected yet? Run: ${pc.bold('npx @agentinbox/cli setup')}`;
   }
 
-  return `Next, connect a channel so agents can reach you: ${pc.bold('npx @agentinbox/cli setup')}`;
+  return `Next, name your agent and connect a channel: ${pc.bold('npx @agentinbox/cli setup')}`;
 }
 
 export function withClaimToken(verificationUrl: string, claimToken: string | null): string {

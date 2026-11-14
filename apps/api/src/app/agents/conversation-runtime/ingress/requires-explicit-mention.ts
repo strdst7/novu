@@ -1,7 +1,9 @@
+import type { isBotMention as SlackIsBotMention } from '@chat-adapter/slack';
 import { type ConversationEntity, type ConversationParticipant, ConversationParticipantTypeEnum } from '@novu/dal';
 import { AGENT_REPLY_METADATA_KEYS, AgentReplyPolicyEnum } from '@novu/shared';
 import type { Message, Thread } from 'chat';
 import { AgentPlatformEnum } from '../../shared/enums/agent-platform.enum';
+import { esmImport } from '../../shared/util/esm-import';
 import { asRecord } from '../../shared/util/raw-record';
 import { isNestedSharedThread } from './platform-thread-id';
 
@@ -137,17 +139,65 @@ export function messageContainsUserMention(message: Message, platform: AgentPlat
   return collectMentionedUserIds(message, platform).length > 0;
 }
 
-/** Whether the raw payload @-mentions this agent's own bot user. */
-export function messageMentionsAgent(
+export type AgentMentionCheck =
+  | { readonly mentioned: true }
+  | { readonly mentioned: false; readonly rejected?: TypeError };
+
+export async function checkAgentMention(
   message: Message,
   platform: AgentPlatformEnum,
   botUserId: string | undefined
-): boolean {
-  if (!botUserId) {
-    return false;
-  }
+): Promise<AgentMentionCheck> {
+  switch (platform) {
+    case AgentPlatformEnum.SLACK: {
+      if (botUserId === undefined) {
+        return { mentioned: false };
+      }
 
-  return collectMentionedUserIds(message, platform).some((id) => isBotUserId(id, botUserId));
+      const event = slackEventOf(message);
+
+      if (!event) {
+        return { mentioned: false };
+      }
+
+      const { isBotMention } = (await esmImport('@chat-adapter/slack/webhook')) as {
+        isBotMention: typeof SlackIsBotMention;
+      };
+
+      try {
+        if (isBotMention(event, botUserId)) {
+          return { mentioned: true };
+        }
+
+        return { mentioned: false };
+      } catch (error) {
+        if (error instanceof TypeError) {
+          return { mentioned: false, rejected: error };
+        }
+
+        throw error;
+      }
+    }
+    case AgentPlatformEnum.TEAMS: {
+      if (collectTeamsMentionedUserIds(message).some((id) => isBotUserId(id, botUserId))) {
+        return { mentioned: true };
+      }
+
+      return { mentioned: false };
+    }
+    case AgentPlatformEnum.WHATSAPP:
+    case AgentPlatformEnum.EMAIL:
+    case AgentPlatformEnum.TELEGRAM:
+    case AgentPlatformEnum.SENDBLUE:
+    case AgentPlatformEnum.PHOTON_IMESSAGE:
+    case AgentPlatformEnum.WEB_CHAT:
+      return { mentioned: false };
+    default: {
+      const exhaustiveCheck: never = platform;
+
+      return exhaustiveCheck;
+    }
+  }
 }
 
 export function messageMentionsOtherHuman(
@@ -207,9 +257,23 @@ function collectSlackMentionedUserIds(message: Message): string[] {
   return ids;
 }
 
-function collectSlackBlockMentionedUserIds(message: Message): string[] {
+function slackEventOf(message: Message): Record<string, unknown> | undefined {
   const raw = asRecord(message.raw);
   const event = asRecord(raw?.event) ?? raw;
+
+  if (!event) {
+    return undefined;
+  }
+
+  if (event.subtype === 'message_changed') {
+    return asRecord(event.message);
+  }
+
+  return event;
+}
+
+function collectSlackBlockMentionedUserIds(message: Message): string[] {
+  const event = slackEventOf(message);
   const blocks = Array.isArray(event?.blocks) ? event.blocks : [];
   const ids: string[] = [];
 
@@ -245,19 +309,61 @@ function collectSlackUserElements(value: unknown, ids: string[]): void {
   }
 }
 
-function slackMentionTexts(message: Message): string[] {
-  const texts: string[] = [];
+type SlackProse = string & { readonly __slackProse: unique symbol };
 
-  if (typeof message.text === 'string' && message.text.length > 0) {
-    texts.push(message.text);
+function maskSlackCodeSpans(text: string): SlackProse {
+  let result = '';
+  let index = 0;
+  const end = text.length;
+
+  while (index < end) {
+    const codeEnd = findSlackCodeEnd(text, index, end);
+
+    if (codeEnd > index) {
+      result += ' ';
+      index = codeEnd;
+      continue;
+    }
+
+    result += text[index];
+    index += 1;
   }
 
-  const raw = asRecord(message.raw);
-  const event = asRecord(raw?.event) ?? raw;
-  const rawText = event?.text;
+  return result as SlackProse;
+}
+
+function findSlackCodeEnd(text: string, index: number, end: number): number {
+  if (text[index] !== '`') {
+    return index;
+  }
+
+  const fence = text.startsWith('```', index);
+  const marker = fence ? '```' : '`';
+  const start = index + marker.length;
+  const close = text.indexOf(marker, start);
+
+  if (close === -1 || close >= end) {
+    return index;
+  }
+
+  if (!fence && text.slice(start, close).includes('\n')) {
+    return index;
+  }
+
+  return close + marker.length;
+}
+
+function slackMentionTexts(message: Message): SlackProse[] {
+  const texts: SlackProse[] = [];
+
+  if (typeof message.text === 'string' && message.text.length > 0) {
+    texts.push(maskSlackCodeSpans(message.text));
+  }
+
+  const rawText = slackEventOf(message)?.text;
 
   if (typeof rawText === 'string' && rawText.length > 0) {
-    texts.push(rawText);
+    texts.push(maskSlackCodeSpans(rawText));
   }
 
   return texts;

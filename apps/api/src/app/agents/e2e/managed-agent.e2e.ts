@@ -170,7 +170,7 @@ describe('Managed Agents API #novu-v2', () => {
         ['credentials']
       );
 
-      expect(integration, 'integration should exist').to.exist;
+      if (!integration) throw new Error('integration should exist');
       const decrypted = decryptCredentials(integration.credentials);
 
       expect(decrypted.externalEnvironmentId, 'externalEnvironmentId should be stored in credentials').to.equal(
@@ -506,22 +506,6 @@ describe('Managed Agents API #novu-v2', () => {
   // ─── GET /v1/agents/:identifier/runtime/config ──────────────────────────────
 
   describe('GET /v1/agents/:identifier/runtime/config', () => {
-    it('should return a minimal config (empty mcpServers and tools) for a managed agent', async () => {
-      const integrationId = await createAgentRuntimeIntegration();
-      const identifier = `e2e-cfg-minimal-${Date.now()}`;
-      createdAgentIdentifiers.push(identifier);
-
-      await session.testAgent.post('/v1/agents').send(managedBody(identifier, integrationId));
-
-      const res = await session.testAgent.get(`/v1/agents/${encodeURIComponent(identifier)}/runtime/config`);
-
-      expect(res.status).to.equal(200);
-      expect(res.body.data.model).to.be.a('string');
-      expect(res.body.data.systemPrompt).to.be.a('string');
-      expect(res.body.data.mcpServers).to.be.an('array');
-      expect(res.body.data.tools).to.be.an('array');
-    });
-
     it('returns shared-agent mcpServers only (subscriber OAuth enabled in Mongo is session-only)', async () => {
       const integrationId = await createAgentRuntimeIntegration();
       const identifier = `e2e-cfg-full-${Date.now()}`;

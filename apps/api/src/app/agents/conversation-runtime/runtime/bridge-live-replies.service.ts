@@ -2,18 +2,25 @@ import type { Readable } from 'node:stream';
 import { Injectable, OnApplicationShutdown } from '@nestjs/common';
 import { type AgentEventEnvelope, isAgentEventEnvelope } from '@novu/agent-event-protocol';
 import { PinoLogger } from '@novu/application-generic';
-import type { ConversationEntity } from '@novu/dal';
 import type { LiveReply } from '@novu/thalamus/durable';
 import { createParser } from 'eventsource-parser';
-import { ResolvedAgentConfig } from '../../channels/agent-config-resolver.service';
 import { streamsLiveReplies } from '../../managed-runtime/live-reply-streamer.service';
 import { type AgentEventContext, AgentEventSink } from '../../shared/agent-event-sink.service';
 import { resolveLifecycleChannel } from '../conversation/run-lifecycle-activity';
+import { AgentTurnAbortStore } from './agent-turn-abort.store';
+import type { ConversationTurn } from './conversation-turn';
 
 /** A bridge controls this stream, so neither a frame nor the replies it opens may grow without bound. */
 const MAX_FRAME_CHARS = 1024 * 1024;
 const MAX_OPEN_REPLIES = 8;
 const MAX_QUEUED_CHARS = 1024 * 1024;
+/** A stopped reply keeps everything it streamed, so its total is capped even while the reader keeps up. */
+const MAX_REPLY_CHARS = 2 * 1024 * 1024;
+/** How often an open reply checks whether its turn was stopped. */
+const ABORT_CHECK_INTERVAL_MS = 500;
+
+/** What a live reply needs from the turn it answers. */
+type LiveReplyTurn = Pick<ConversationTurn, 'config' | 'conversation' | 'platformThreadId' | 'platformUserId'>;
 
 /** Streams the replies a bridge writes to its SSE response into the conversation's channel. */
 @Injectable()
@@ -22,6 +29,7 @@ export class BridgeLiveReplies implements OnApplicationShutdown {
 
   constructor(
     private readonly agentEventSink: AgentEventSink,
+    private readonly turnAbortStore: AgentTurnAbortStore,
     private readonly logger: PinoLogger
   ) {
     this.logger.setContext(this.constructor.name);
@@ -33,32 +41,24 @@ export class BridgeLiveReplies implements OnApplicationShutdown {
   }
 
   /** Set only when the channel streams; the bridge is then asked for SSE and its body handed to the reader. */
-  readerFor(
-    config: ResolvedAgentConfig,
-    conversation: ConversationEntity,
-    platformThreadId?: string
-  ): ((body: Readable) => void) | undefined {
-    if (!streamsLiveReplies(config.platform)) {
+  readerFor(turn: LiveReplyTurn): ((body: Readable) => void) | undefined {
+    if (!streamsLiveReplies(turn.config.platform)) {
       return undefined;
     }
 
     return (body) => {
       this.bodies.add(body);
       body.once('close', () => this.bodies.delete(body));
-      this.read(body, config, conversation, platformThreadId).catch((err) => {
+      this.read(body, turn).catch((err) => {
         body.destroy();
-        this.logger.warn(err, `[agent:${config.agentIdentifier}] Bridge live reply stream ended early`);
+        this.logger.warn(err, `[agent:${turn.config.agentIdentifier}] Bridge live reply stream ended early`);
       });
     };
   }
 
-  private async read(
-    body: Readable,
-    config: ResolvedAgentConfig,
-    conversation: ConversationEntity,
-    platformThreadId?: string
-  ): Promise<void> {
-    const channel = resolveLifecycleChannel(conversation, platformThreadId);
+  private async read(body: Readable, turn: LiveReplyTurn): Promise<void> {
+    const { config, conversation } = turn;
+    const channel = resolveLifecycleChannel(conversation, turn.platformThreadId);
     const context: AgentEventContext = {
       userId: config.organizationId,
       environmentId: config.environmentId,
@@ -69,6 +69,7 @@ export class BridgeLiveReplies implements OnApplicationShutdown {
       agentId: config.agentId,
       platform: config.platform,
       platformThreadId: channel.platformThreadId,
+      platformUserId: turn.platformUserId,
       channel,
       source: 'bridge',
     };
@@ -76,7 +77,8 @@ export class BridgeLiveReplies implements OnApplicationShutdown {
     await readBridgeLiveReplies(
       body,
       (envelope) => envelope.conversationId === context.conversationId && envelope.agentId === config.agentIdentifier,
-      (runId, messageId, reply) => this.agentEventSink.startLiveReply(context, runId, messageId, () => reply)
+      (runId, messageId, reply) => this.agentEventSink.startLiveReply(context, runId, messageId, () => reply),
+      (turnId) => this.turnAbortStore.isAborted(turnId)
     );
   }
 }
@@ -84,6 +86,8 @@ export class BridgeLiveReplies implements OnApplicationShutdown {
 /** Text of one reply a bridge is writing to its SSE response. */
 class BridgeLiveReply implements LiveReply {
   readonly final: Promise<string | undefined>;
+  /** Everything streamed so far; a stopped reply ends with it. */
+  streamedText = '';
   private settleFinal: (text: string | undefined) => void = () => {};
   private readonly pending: string[] = [];
   private queuedChars = 0;
@@ -97,6 +101,9 @@ class BridgeLiveReply implements LiveReply {
   }
 
   push(delta: string): void {
+    if (this.ended) return;
+    if (this.streamedText.length + delta.length > MAX_REPLY_CHARS) throw new Error('Bridge live reply is too long');
+    this.streamedText += delta;
     this.queuedChars += delta.length;
     if (this.queuedChars > MAX_QUEUED_CHARS) throw new Error('Bridge live reply is not being read');
     this.pending.push(delta);
@@ -136,20 +143,50 @@ class BridgeLiveReply implements LiveReply {
  * Reads a bridge's SSE response. Each `message-start` opens a reply handed to `onReply`, its
  * `message-delta`s feed it and `message-end` settles its final text. Replies still open when the
  * response ends settle without text, so their durable `message` delivers them instead.
+ *
+ * Once a user stops the turn, open replies settle with the text streamed so far and the rest of the
+ * response is drained unread: the stopped turn's durable `message` is dropped at ingest.
  */
-async function readBridgeLiveReplies(
+export async function readBridgeLiveReplies(
   body: Readable,
   accepts: (envelope: AgentEventEnvelope) => boolean,
-  onReply: (runId: string, messageId: string, reply: LiveReply) => void
+  onReply: (runId: string, messageId: string, reply: LiveReply) => void,
+  isTurnAborted: (turnId: string) => Promise<boolean>
 ): Promise<void> {
   const open = new Map<string, BridgeLiveReply>();
+  let turnId: string | undefined;
+  let isAborted = false;
+  let isChecking = false;
+
+  const stop = () => {
+    isAborted = true;
+    // A reply stopped before its first text has nothing to keep.
+    for (const reply of open.values()) reply.end(reply.streamedText || undefined);
+    open.clear();
+  };
+  const checkAborted = async () => {
+    if (isAborted || isChecking || !turnId || open.size === 0) return;
+    isChecking = true;
+    try {
+      if (await isTurnAborted(turnId)) stop();
+    } finally {
+      isChecking = false;
+    }
+  };
+  const timer = setInterval(() => void checkAborted().catch(() => undefined), ABORT_CHECK_INTERVAL_MS);
+  timer.unref();
 
   try {
     for await (const data of sseData(body)) {
       const envelope = parseEnvelope(data);
-      if (envelope && accepts(envelope)) applyEnvelope(open, envelope, onReply);
+      if (!envelope || !accepts(envelope)) continue;
+      turnId ??= envelope.turnId;
+      if (!isAborted) applyEnvelope(open, envelope, onReply);
     }
   } finally {
+    clearInterval(timer);
+    // The bridge ends its response when it aborts, which can beat the next check.
+    if (!isAborted && turnId && open.size > 0 && (await isTurnAborted(turnId).catch(() => false))) stop();
     for (const reply of open.values()) reply.end();
   }
 }

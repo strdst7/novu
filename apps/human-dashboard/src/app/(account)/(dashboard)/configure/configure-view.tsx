@@ -10,10 +10,12 @@ import { useNow } from '@/hooks/use-now';
 import type { AgentSettings } from '@/lib/agent-settings';
 import type { ToolId } from '@/lib/ai-tools';
 import { type HostStatus, hostLiveness } from '@/lib/host-status';
+import type { HostId } from '@/lib/hosts';
 import type { ChannelVia } from '@/lib/human-channels-api';
 import type { ChannelRow } from '@/lib/human-channels-overview';
 import type { SlackSetupState } from '@/lib/human-slack-setup';
 import type { TelegramSetupState } from '@/lib/human-telegram-setup';
+import type { AgentLook } from '@/lib/look';
 
 import { AgentSettingsCard } from './agent-settings';
 import { AgentSetup } from './agent-setup';
@@ -31,13 +33,17 @@ export type ConfigureAgent = {
   pictureUrl?: string;
   createdAt?: string;
   active: boolean;
+  /** Its mascot's body and colour and its card's art. */
+  look: AgentLook;
 };
 
 type ConfigureViewProps = {
   /** The drawer the page opens with, when a link asked for one (`?setup=`). */
   initialDrawer: ChannelVia | null;
+  /** "Connect another agent" opens on this host, when a link asked for it (`?connect=`). */
+  connectHost: HostId | null;
   agent: ConfigureAgent;
-  /** The operator's full name, or empty when Clerk has none. */
+  /** The operator as the API names them for the public card, "Ada L.", or empty without a first name. */
   operatorName: string;
   channels: ChannelRow[];
   telegramSetup: TelegramSetupState;
@@ -55,8 +61,10 @@ type ConfigureViewProps = {
   docsUrl: string;
   mcpUrl: string | null;
   connectedTools: ToolId[];
-  /** Who can reach the agent and whether it is paused: the SETTINGS block. `null` when they couldn't be read. */
+  /** The SETTINGS block: who can reach the agent, acknowledging, the pause. `null` when they couldn't be read. */
   settings: AgentSettings | null;
+  /** The new agent card in place of the ID card, for the accounts that have it (the onboarding's flag). */
+  newCard: boolean;
 };
 
 /**
@@ -65,6 +73,7 @@ type ConfigureViewProps = {
  */
 export function ConfigureView({
   initialDrawer,
+  connectHost,
   agent,
   operatorName,
   channels,
@@ -79,6 +88,7 @@ export function ConfigureView({
   mcpUrl,
   connectedTools,
   settings,
+  newCard,
 }: ConfigureViewProps) {
   const [openDrawer, setOpenDrawer] = useState<ChannelVia | null>(initialDrawer);
   const [sharing, setSharing] = useState(false);
@@ -102,7 +112,9 @@ export function ConfigureView({
   const now = useNow(renderedAt);
   const lastCheckedAt = useLastHostCheck(hostStatus?.lastCheckedAt ?? null, now);
   const hostConnected = hostLiveness(lastCheckedAt, now) === 'live';
-  const state: AgentState = !agent.active ? 'paused' : hostConnected ? 'active' : 'waiting';
+  // Paused as the Settings block shows it: as soon as its switch is flipped, and back if saving that fails.
+  const [paused, setPaused] = useState(Boolean(settings?.paused));
+  const state: AgentState = !agent.active || paused ? 'paused' : hostConnected ? 'active' : 'waiting';
 
   return (
     <>
@@ -120,6 +132,8 @@ export function ConfigureView({
           telegram={connected('telegram') ? { bot: telegramBot ? `@${telegramBot}` : null } : null}
           slack={slack && (joinDefined([slack.appName, slack.workspace], ' · ') || 'Connected')}
           onShare={() => setSharing(true)}
+          look={agent.look}
+          newCard={newCard}
         />
 
         <div className="flex w-full min-w-0 flex-1 flex-col gap-5">
@@ -144,12 +158,15 @@ export function ConfigureView({
             address={email}
             apiUrl={apiUrl}
             lastCheckedAt={lastCheckedAt}
+            hosts={hostStatus?.hosts}
+            listening={hostStatus?.listening ?? null}
             renderedAt={renderedAt}
             docsUrl={docsUrl}
             mcpUrl={mcpUrl}
             connectedTools={connectedTools}
+            connectHost={connectHost}
           />
-          <AgentSettingsCard handle={agent.handle} settings={settings} />
+          <AgentSettingsCard handle={agent.handle} settings={settings} onPausedChange={setPaused} />
         </div>
       </div>
 

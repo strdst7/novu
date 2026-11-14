@@ -4,17 +4,31 @@ import { refresh } from 'next/cache';
 import { redirect } from 'next/navigation';
 
 import { CONFIGURE_PATH, DASHBOARD_HOME } from '@/components/dashboard/nav';
+import { isToolId } from '@/lib/ai-tools';
 import { findCurrentUser } from '@/lib/auth-page';
+import type { ConnectCodeResult } from '@/lib/host-status';
+import { isHostId } from '@/lib/hosts';
 import { requireHumanAccount } from '@/lib/human-account';
-import { HumanApiError } from '@/lib/human-api-error';
+import { sendAgentTestEmail } from '@/lib/human-agent-api';
+import { HumanApiError, isHumanApiRefusal } from '@/lib/human-api-error';
+import { requestForAccount } from '@/lib/human-api-key';
+import { createConnectCode } from '@/lib/human-hosts-api';
 import { describeProgress, loadSetupProgress, updateOnboardingState } from '@/lib/human-onboarding';
 import { ensureRelay } from '@/lib/human-operator';
+import { listConnectedTools } from '@/lib/human-tools-api';
+import { isAgentLook } from '@/lib/look';
 import { AGENT_NAME_MAX_LENGTH, ONBOARDING_PATH, toHandle } from '@/lib/onboarding';
-import { type AddressCheck, checkAddress } from '@/lib/onboarding-mocks';
 
 const DESTINATIONS = { inbox: DASHBOARD_HOME, configure: CONFIGURE_PATH, contacts: '/contacts' };
 
 type Destination = keyof typeof DESTINATIONS;
+
+export type AddressCheck = {
+  handle: string;
+  available: boolean;
+  /** A free address close to the one that is taken. */
+  suggestion?: string;
+};
 
 export type CreateInboxResult =
   | { ok: true }
@@ -27,20 +41,36 @@ export async function checkAddressAction(handle: string): Promise<AddressCheck |
     return null;
   }
 
+  const account = await requireHumanAccount({ returnTo: ONBOARDING_PATH });
   const user = await findCurrentUser();
 
-  return checkAddress(handle, user?.primaryEmailAddress?.emailAddress ?? null);
+  try {
+    return await requestForAccount<AddressCheck>(account, '/v1/human/inbox-address', {
+      query: {
+        handle,
+        ...(user?.primaryEmailAddress?.emailAddress ? { email: user.primaryEmailAddress.emailAddress } : {}),
+      },
+    });
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Step 1: makes the agent under the name the operator gave it. The same call as `setup`, so running
- * it for an agent a terminal made in the meantime only names that one.
+ * Step 1: makes the agent under the name the operator gave it, at the address they chose. The same
+ * call as `setup`, so running it for an agent a terminal made in the meantime only names that one
+ * and leaves the mailbox it already has. An address Clerk has verified counts as verified at once, so
+ * the agent can email the operator without a confirmation link.
  */
-export async function createInboxAction(input: { name: string; handle: string }): Promise<CreateInboxResult> {
+export async function createInboxAction(input: {
+  name: string;
+  handle: string;
+  /** The look picked in the onboarding where the agent says hi. Only a new agent takes it. */
+  look?: unknown;
+}): Promise<CreateInboxResult> {
   const account = await requireHumanAccount({ returnTo: ONBOARDING_PATH });
   const user = await findCurrentUser();
   const name = String(input.name ?? '').trim();
-  const handle = String(input.handle ?? '');
 
   if (!user) {
     return { ok: false, message: 'Your session has ended. Reload this page and sign in again.' };
@@ -50,15 +80,12 @@ export async function createInboxAction(input: { name: string; handle: string })
     return { ok: false, message: `Give your agent a name of up to ${AGENT_NAME_MAX_LENGTH} characters.` };
   }
 
+  const handle = String(input.handle ?? '');
   if (!isHandle(handle)) {
     return { ok: false, message: 'An address takes letters, digits and hyphens.' };
   }
 
   const email = user.primaryEmailAddress?.emailAddress;
-  const check = checkAddress(handle, email ?? null);
-  if (!check.available) {
-    return { ok: false, message: `${handle} is taken`, check };
-  }
 
   // Taken before the agent is made, so the agent is never older than the start of its own onboarding.
   const now = new Date().toISOString();
@@ -68,10 +95,24 @@ export async function createInboxAction(input: { name: string; handle: string })
     ({ agentId } = await ensureRelay(
       account,
       { firstName: user.firstName, lastName: user.lastName },
-      { agentName: name, operatorEmail: email }
+      {
+        agentName: name,
+        operatorEmail: email,
+        operatorEmailVerified: user.primaryEmailAddress?.verification?.status === 'verified',
+        inboxHandle: handle,
+        ...(isAgentLook(input.look) ? { look: input.look } : {}),
+      }
     ));
   } catch (error) {
     console.error('Failed to create the agent from the onboarding', error);
+
+    if (error instanceof HumanApiError && error.code === 'inbox_address_taken') {
+      return {
+        ok: false,
+        message: error.message,
+        check: { handle, available: false, ...(error.suggestion ? { suggestion: error.suggestion } : {}) },
+      };
+    }
 
     return {
       ok: false,
@@ -82,20 +123,71 @@ export async function createInboxAction(input: { name: string; handle: string })
   // Step 1 again for the same agent (a retry, or a form left open in another tab) keeps how far it got. A
   // new agent starts its steps from here: progress left over from one that was deleted (when forgetting it
   // then failed) must not take this one past its test and its host.
-  await updateOnboardingState((state) =>
-    !state.agentId || state.agentId === agentId
-      ? { ...state, startedAt: state.startedAt ?? now, handle, agentId }
-      : { startedAt: state.startedAt ?? now, handle, agentId }
-  );
+  await updateOnboardingState((state) => {
+    const { handle: _chosenHandle, ...kept } = state;
+
+    return !state.agentId || state.agentId === agentId
+      ? { ...kept, startedAt: state.startedAt ?? now, agentId }
+      : { startedAt: state.startedAt ?? now, agentId };
+  });
   refresh();
 
   return { ok: true };
 }
 
-/** Step 2: "sends" the test email. Sending it again leaves a reply that already landed where it is. */
-export async function sendTestEmailAction(): Promise<void> {
+export type SendTestEmailResult = { ok: true } | { ok: false; message: string };
+
+/**
+ * Step 2: sends a real email from the Agent Email Inbox to the operator’s sign-up address.
+ * Optional. The step already listens for any inbound mail, so a message already received stays received.
+ */
+export async function sendTestEmailAction(): Promise<SendTestEmailResult> {
+  const account = await requireHumanAccount({ returnTo: ONBOARDING_PATH });
+  const user = await findCurrentUser();
+  const email = user?.primaryEmailAddress?.emailAddress;
+
+  if (!email) {
+    return { ok: false, message: 'Your account has no email address to send the test to.' };
+  }
+
+  try {
+    await sendAgentTestEmail(account, email);
+  } catch (error) {
+    console.error('Failed to send the test email', error);
+
+    return {
+      ok: false,
+      message: error instanceof HumanApiError ? error.message : 'Something went wrong. Please try again.',
+    };
+  }
+
   await updateOnboardingState((state) => ({ ...state, testSentAt: new Date().toISOString() }));
   refresh();
+
+  return { ok: true };
+}
+
+/** A real one-time code for the host the operator connects in step 3, made for the host chosen there (`host`). */
+export async function createOnboardingConnectCodeAction(handle: string, host?: string): Promise<ConnectCodeResult> {
+  if (!isHandle(handle)) {
+    return { ok: false, error: 'This agent can’t be connected by name. Check its address on this page.' };
+  }
+
+  const account = await requireHumanAccount({ returnTo: ONBOARDING_PATH });
+
+  try {
+    const code = await createConnectCode(account, handle, isHostId(host) ? host : undefined);
+
+    return { ok: true, code, expiresInMs: Date.parse(code.expiresAt) - Date.now() };
+  } catch (error) {
+    if (isHumanApiRefusal(error) && error instanceof Error) {
+      return { ok: false, error: error.message };
+    }
+
+    console.error('Failed to get an onboarding connect code', error);
+
+    return { ok: false, error: 'We couldn’t get a code just now.' };
+  }
 }
 
 /**
@@ -117,16 +209,40 @@ export async function leaveTestAction(how: 'connect' | 'skip' | 'later'): Promis
   refresh();
 }
 
-/** Step 3: the operator copied the prompt or its commands. The stand-in host connects a moment later. */
-export async function notePromptCopiedAction(): Promise<void> {
+/** Leaves step 3 for the dashboard while setup is still unfinished. */
+export async function leaveConnectAction(): Promise<void> {
   const now = new Date().toISOString();
-  await updateOnboardingState((state) => (state.promptCopiedAt ? state : { ...state, promptCopiedAt: now }));
+  await updateOnboardingState((state) => ({
+    ...state,
+    skippedAt: state.skippedAt ?? now,
+  }));
+
+  redirect(DASHBOARD_HOME);
 }
 
-/** Leaves the steps unfinished for the dashboard, where the banners keep pointing back to the step left behind. */
-export async function skipForNowAction(destination: Destination = 'inbox'): Promise<void> {
-  await updateOnboardingState((state) => ({ ...state, skippedAt: new Date().toISOString() }));
-  redirect(DESTINATIONS[destination] ?? DASHBOARD_HOME);
+/**
+ * A.2 of the onboarding where the agent says hi: where the agent lives. The host leads to its own steps on A.3,
+ * and is the one A.4a asks to say hi until another host connects.
+ */
+export async function pickHostAction(host: string): Promise<void> {
+  if (!isHostId(host)) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+  await updateOnboardingState((state) => ({ ...state, hostPickedAt: now, pickedHost: host }));
+  refresh();
+}
+
+/**
+ * "Do it later" on A.3: the dashboard opens with its banners, and "Continue setup" asks where the agent lives
+ * again. Every time counts, so the latest is kept.
+ */
+export async function leaveSayHiConnectAction(): Promise<void> {
+  const now = new Date().toISOString();
+  await updateOnboardingState((state) => ({ ...state, skippedAt: now }));
+
+  redirect(DASHBOARD_HOME);
 }
 
 /** Leaves step 4, and with it the onboarding, for a page of the dashboard. */
@@ -139,8 +255,12 @@ export async function finishOnboardingAction(destination: Destination): Promise<
 /** How far the setup got right now (`describeProgress`). The onboarding page reloads on a new answer. */
 export async function readOnboardingStatusAction(): Promise<string> {
   const account = await requireHumanAccount({ returnTo: ONBOARDING_PATH });
+  const progress = await loadSetupProgress(account);
+  if (progress.agent && progress.state.testLeftAt && !progress.hostStatus) {
+    throw new Error('Failed to read the host status');
+  }
 
-  return describeProgress(await loadSetupProgress(account));
+  return describeProgress(progress);
 }
 
 /** Configure: the "is set up" banner was dismissed and stays away. */
@@ -153,6 +273,17 @@ export async function dismissDoneBannerAction(): Promise<void> {
 export async function hideChecklistAction(): Promise<void> {
   await updateOnboardingState((state) => ({ ...state, checklist: { ...state.checklist, hidden: true } }));
   refresh();
+}
+
+/** Whether a chat app has signed in to the account. Its drawer on step 3 asks while it's open. */
+export async function checkOnboardingToolConnectedAction(tool: string): Promise<boolean> {
+  if (!isToolId(tool)) {
+    return false;
+  }
+
+  const account = await requireHumanAccount({ returnTo: ONBOARDING_PATH });
+
+  return (await listConnectedTools(account)).includes(tool);
 }
 
 /** Inbox: ticks an item of the list off, once the operator did what it asks. */

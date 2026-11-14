@@ -1,17 +1,20 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiHideProperty, ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { AGENT_NAME_MAX_LENGTH, HumanChannelViaEnum } from '@novu/shared';
-import { Transform, type TransformFnParams } from 'class-transformer';
+import { Transform, type TransformFnParams, Type } from 'class-transformer';
 import {
   IsBoolean,
   IsEmail,
   IsEnum,
   IsNotEmpty,
+  IsObject,
   IsOptional,
   IsString,
   Matches,
   MaxLength,
   ValidateIf,
+  ValidateNested,
 } from 'class-validator';
+import { AgentLookDto, SetupAgentLookDto } from './human-agent-look.dto';
 
 /** As long as a Telegram bot's description may be, the longest of the places it is shown. */
 export const AGENT_DESCRIPTION_MAX_LENGTH = 512;
@@ -50,7 +53,7 @@ export class SetupHumanRelayRequestDto {
   @ApiPropertyOptional({
     description:
       'What the relay agent is called, as people see it on the invite page, in emails and on its chat bots. ' +
-      'Missing leaves the name it has; a new agent is called "Human".',
+      'Missing leaves the name it has; a new agent is called "Agent".',
     maxLength: AGENT_NAME_MAX_LENGTH,
   })
   @IsOptional()
@@ -59,6 +62,15 @@ export class SetupHumanRelayRequestDto {
   @IsNotEmpty()
   @MaxLength(AGENT_NAME_MAX_LENGTH)
   agentName?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Mailbox local-part the operator chose, such as `atlas-acme`. Missing means derive one from the agent name.',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/)
+  inboxHandle?: string;
 
   @ApiPropertyOptional({
     description: 'A line about what the relay agent does, shown with its name. An empty one clears it.',
@@ -77,6 +89,15 @@ export class SetupHumanRelayRequestDto {
   @IsOptional()
   @IsEmail()
   email?: string;
+
+  /**
+   * Sign-in has proved `email` is the operator's, so it needs no confirmation link. Only the dashboard's server
+   * can say so: hosts hold the same key, so the API ignores this from anyone without the dashboard's secret.
+   */
+  @ApiHideProperty()
+  @IsOptional()
+  @IsBoolean()
+  emailVerified?: boolean;
 
   @ApiPropertyOptional({
     description: 'The human’s first name (display name shown to agents and in reply attribution).',
@@ -100,6 +121,23 @@ export class SetupHumanRelayRequestDto {
   @IsOptional()
   @IsEnum(HumanChannelViaEnum)
   defaultVia?: HumanChannelViaEnum;
+
+  /**
+   * The look picked for the agent while it is made: its mascot's shape and colour, and its card's art. The
+   * dashboard's server sends the one its operator picked in the onboarding. A host may send one too, and it is
+   * taken where looks are on, with an account or without one (`GET /human/inbox-address` says so), and ignored
+   * elsewhere.
+   */
+  @ApiPropertyOptional({
+    type: SetupAgentLookDto,
+    description:
+      'The look of a new agent: its mascot’s shape and colour. Only a new agent takes it, and only where looks are on; an agent that exists keeps its own. A part left out is the original look’s.',
+  })
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => SetupAgentLookDto)
+  look?: SetupAgentLookDto;
 }
 
 export class SetupHumanRelayResponseDto {
@@ -112,11 +150,29 @@ export class SetupHumanRelayResponseDto {
   @ApiProperty({ description: 'What the relay agent is called.' })
   agentName: string;
 
+  @ApiProperty({ type: AgentLookDto, description: 'How the agent looks, for the mascot on the CLI’s screen.' })
+  look: AgentLookDto;
+
   @ApiProperty()
   subscriberId: string;
+
+  @ApiPropertyOptional({ description: 'The Agent Inbox address, when one was just created.' })
+  emailAddress?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'The new mailbox is not the slug of the agent name, because that handle was taken or could not be one.',
+  })
+  emailHandleAdjusted?: boolean;
 }
 
 export class HumanOperatorResponseDto {
   @ApiPropertyOptional({ description: 'subscriberId of the account owner’s contact. Missing before any setup.' })
   subscriberId?: string;
+
+  @ApiPropertyOptional({
+    type: AgentLookDto,
+    description: 'The agent’s look, for the CLI’s mascot. Missing before any setup has made the agent.',
+  })
+  agentLook?: AgentLookDto;
 }

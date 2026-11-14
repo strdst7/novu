@@ -5,6 +5,7 @@ import {
   createContext,
   type TransitionStartFunction,
   useContext,
+  useEffect,
   useId,
   useLayoutEffect,
   useOptimistic,
@@ -63,19 +64,21 @@ const MOTION = 'duration-200 ease-out motion-reduce:transition-none';
 type AgentSettingsCardProps = {
   /** How the agent is called in a sentence: its address without the domain. */
   handle: string;
-  /** `null` when the page couldn't read them: the two controls then wait, and the block says so. */
+  /** `null` when the page couldn't read them: the controls then wait, and the block says so. */
   settings: AgentSettings | null;
+  /** Told whether the agent shows as paused, for the card on the page: the switch's state, as it changes. */
+  onPausedChange?: (paused: boolean) => void;
 };
 
-type SettingRow = 'reach' | 'pause';
+type SettingRow = 'reach' | 'acknowledge' | 'pause';
 
 /**
- * SETTINGS on the Configure page (`1.6` / `4.1 · Configure`): who can reach the agent, pausing it, and
- * deleting it. A change shows at once and is saved behind it; when saving fails the control goes back to
- * what was saved, and the row says what went wrong. Settings the page couldn't read aren't shown as if they
- * were saved: the controls can't be used until a reload reads them.
+ * SETTINGS on the Configure page (`1.6` / `4.1 · Configure`): who can reach the agent, acknowledging incoming
+ * messages, pausing it, and deleting it. A change shows at once and is saved behind it; when saving fails the
+ * control goes back to what was saved, and the row says what went wrong. Settings the page couldn't read aren't
+ * shown as if they were saved: the controls can't be used until a reload reads them.
  */
-export function AgentSettingsCard({ handle, settings }: AgentSettingsCardProps) {
+export function AgentSettingsCard({ handle, settings, onPausedChange }: AgentSettingsCardProps) {
   const actions = useContext(AgentSettingsActionsContext);
   const unavailable = settings === null;
   // What was saved last: the page's settings, or what a save answered with before the page caught up.
@@ -87,8 +90,14 @@ export function AgentSettingsCard({ handle, settings }: AgentSettingsCardProps) 
   }
 
   const [shown, showChange] = useOptimistic(saved, applyChange);
+  // The card shows the pause as the switch does: at once, and undone with it when saving fails.
+  const pausedShown = Boolean(shown.paused);
+  useEffect(() => {
+    onPausedChange?.(pausedShown);
+  }, [pausedShown, onPausedChange]);
   const [errors, setErrors] = useState<Partial<Record<SettingRow, string>>>({});
   const [reachSaving, startReachSave] = useTransition();
+  const [acknowledgeSaving, startAcknowledgeSave] = useTransition();
   const [pauseSaving, startPauseSave] = useTransition();
 
   function save(row: SettingRow, change: AgentSettingsChange, start: TransitionStartFunction) {
@@ -106,6 +115,7 @@ export function AgentSettingsCard({ handle, settings }: AgentSettingsCardProps) 
   }
 
   const reachId = useId();
+  const acknowledgeId = useId();
   const pauseId = useId();
 
   return (
@@ -132,6 +142,22 @@ export function AgentSettingsCard({ handle, settings }: AgentSettingsCardProps) 
             busy={reachSaving}
             disabled={unavailable}
             onChange={(reach) => save('reach', { reach }, startReachSave)}
+          />
+        </li>
+        <li className={ROW}>
+          <RowText
+            id={acknowledgeId}
+            title="Acknowledge incoming messages"
+            hint="Shows typing as a message arrives, on Telegram and in Slack threads. Gmail gets an eyes reaction."
+            error={errors.acknowledge}
+          />
+          <Switch
+            labelledBy={`${acknowledgeId}-title`}
+            describedBy={`${acknowledgeId}-hint`}
+            on={shown.acknowledgeOnReceived}
+            busy={acknowledgeSaving}
+            disabled={unavailable}
+            onChange={(acknowledgeOnReceived) => save('acknowledge', { acknowledgeOnReceived }, startAcknowledgeSave)}
           />
         </li>
         <li className={ROW}>
@@ -167,6 +193,10 @@ export function AgentSettingsCard({ handle, settings }: AgentSettingsCardProps) 
 function applyChange(settings: AgentSettings, change: AgentSettingsChange): AgentSettings {
   if ('reach' in change) {
     return { ...settings, reach: change.reach };
+  }
+
+  if ('acknowledgeOnReceived' in change) {
+    return { ...settings, acknowledgeOnReceived: change.acknowledgeOnReceived };
   }
 
   if (!change.paused) {
@@ -315,8 +345,10 @@ function ReachControl({ labelledBy, value, busy, disabled = false, onChange }: R
 }
 
 type SwitchProps = {
-  labelledBy: string;
-  describedBy: string;
+  /** What names it: the id of a title on the page, or `label` when there's none to point at. */
+  labelledBy?: string;
+  label?: string;
+  describedBy?: string;
   on: boolean;
   busy: boolean;
   /** The setting couldn't be read, so it can't be changed either. */
@@ -326,15 +358,17 @@ type SwitchProps = {
 
 /**
  * The toggle of the design: off, a grey knob on the left of a bordered track; on, a larger dark knob on
- * the right of an orange one. The knob slides and grows, and the track changes colour, together.
+ * the right of an orange one. The knob slides and grows, and the track changes colour, together. The Contacts
+ * page has it too, for whom the agent listens to.
  */
-function Switch({ labelledBy, describedBy, on, busy, disabled = false, onChange }: SwitchProps) {
+export function Switch({ labelledBy, label, describedBy, on, busy, disabled = false, onChange }: SwitchProps) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={on}
       aria-labelledby={labelledBy}
+      aria-label={labelledBy ? undefined : label}
       aria-describedby={describedBy}
       aria-busy={busy || undefined}
       disabled={disabled}

@@ -37,10 +37,10 @@ export type LoginRequestStatus =
  * APIs that don't know it yet ignore it.
  */
 export async function startLoginRequest(apiUrl: string, machineName?: string): Promise<LoginRequest> {
-  const res = await createPublicApiClient(apiUrl).post<{ data?: LoginRequest } | LoginRequest>(
-    '/v1/cli/device-sessions',
-    { name: CLI_SESSION_NAME, ...(machineName ? { machineName } : {}) }
-  );
+  const res = await createPublicApiClient(apiUrl).post<{ data?: LoginRequest } | LoginRequest>('/v1/login', {
+    name: CLI_SESSION_NAME,
+    ...(machineName ? { machineName } : {}),
+  });
   const request = unwrap(res.data);
 
   if (!request?.deviceCode) {
@@ -53,7 +53,7 @@ export async function startLoginRequest(apiUrl: string, machineName?: string): P
 /** Reading an approved request hands over its key once; the request is gone after that. */
 export async function checkLoginRequest(apiUrl: string, deviceCode: string): Promise<LoginRequestStatus> {
   const res = await createPublicApiClient(apiUrl).post<{ data?: LoginRequestStatus } | LoginRequestStatus>(
-    `/v1/cli/device-sessions/${encodeURIComponent(deviceCode)}/poll`
+    `/v1/login/${encodeURIComponent(deviceCode)}/poll`
   );
 
   return unwrap(res.data);
@@ -65,7 +65,7 @@ export async function checkLoginRequest(apiUrl: string, deviceCode: string): Pro
  */
 export async function getKeylessClaimToken(client: ApiClient): Promise<string | null> {
   try {
-    const res = await client.axios.post<{ data?: { token: string } } | { token: string }>('/v1/human/claim-token');
+    const res = await client.axios.post<{ data?: { token: string } } | { token: string }>('/v1/login/claim');
 
     return unwrap(res.data).token;
   } catch (err) {
@@ -77,10 +77,10 @@ export async function getKeylessClaimToken(client: ApiClient): Promise<string | 
   }
 }
 
-/** Whether the environment behind `client` has this subscriber. Only a definite 404 counts as missing. */
+/** Whether the account behind `client` has this contact. Only a definite 404 counts as missing. */
 export async function hasSubscriber(client: ApiClient, subscriberId: string): Promise<boolean> {
   try {
-    await client.axios.get(`/v2/subscribers/${encodeURIComponent(subscriberId)}`);
+    await client.axios.get(`/v1/contacts/${encodeURIComponent(subscriberId)}`);
 
     return true;
   } catch (err) {
@@ -92,24 +92,35 @@ export async function hasSubscriber(client: ApiClient, subscriberId: string): Pr
   }
 }
 
-/**
- * The contact the account behind `client` has for its owner: made by `npx @agentinbox/cli setup` on any computer, or on
- * the Agent Inbox dashboard. Undefined when the account has none yet. APIs from before it was recorded answer 404.
- */
-export async function findOperator(client: ApiClient): Promise<string | undefined> {
-  try {
-    const res = await client.axios.get<{ data?: { subscriberId?: string } } | { subscriberId?: string }>(
-      '/v1/human/operator'
-    );
+/** What the account answers about its owner, and about the agent that works for them. */
+export interface OperatorAnswer {
+  /** The contact the account has for its owner. Missing when it has none yet. */
+  subscriberId?: string;
+  /** How the account's agent looks (see `lookOf`). Missing while it has no agent, and from an API before looks. */
+  agentLook?: unknown;
+}
 
-    return unwrap(res.data)?.subscriberId || undefined;
+/** The account behind `client`, as `GET /v1/operator` answers it. APIs from before the operator was recorded answer 404. */
+export async function readOperator(client: ApiClient): Promise<OperatorAnswer> {
+  try {
+    const res = await client.axios.get<{ data?: OperatorAnswer } | OperatorAnswer>('/v1/operator');
+
+    return unwrap(res.data) ?? {};
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) {
-      return undefined;
+      return {};
     }
 
     throw err;
   }
+}
+
+/**
+ * The contact the account behind `client` has for its owner: made by `npx @agentinbox/cli setup` on any computer, or on
+ * the Agent Inbox dashboard. Undefined when the account has none yet.
+ */
+export async function findOperator(client: ApiClient): Promise<string | undefined> {
+  return (await readOperator(client)).subscriberId || undefined;
 }
 
 function readCode(body: unknown): string | undefined {

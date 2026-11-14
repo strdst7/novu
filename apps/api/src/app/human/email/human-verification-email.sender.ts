@@ -6,8 +6,10 @@ import type { IEmailOptions } from '@novu/shared';
 import type { ResolvedAgentOutboundEmail } from '../../agents/email/resolve-agent-outbound-email';
 import { isKeylessOrganization } from '../../keyless/keyless-organization.helpers';
 import { resolveHumanDashboardBaseUrl } from '../../shared/helpers/resolve-human-dashboard-base-url';
+import { AgentInboxFeaturesService } from '../services/agent-inbox-features.service';
+import { agentPictureOrDefaultUrl } from '../services/agent-picture-url';
 import { HumanOperatorService } from '../services/human-operator.service';
-import { buildRelayOwnerName, resolveRelaySender } from '../services/relay-owner-name';
+import { resolveRelaySender } from '../services/relay-owner-name';
 import { buildHumanVerificationEmail } from './human-verification-email.template';
 
 /**
@@ -22,6 +24,7 @@ export class HumanVerificationEmailSender {
     private readonly subscriberRepository: SubscriberRepository,
     private readonly operatorService: HumanOperatorService,
     private readonly inboxQuota: AgentEmailInboxQuotaService,
+    private readonly features: AgentInboxFeaturesService,
     private readonly logger: PinoLogger
   ) {
     this.logger.setContext(this.constructor.name);
@@ -34,7 +37,6 @@ export class HumanVerificationEmailSender {
     subscriberId: string;
     address: string;
     token: string;
-    expiresAt: string;
     outbound: ResolvedAgentOutboundEmail;
     /** Keyless setups only: the operator can claim the setup from the same email. */
     claimUrl?: string;
@@ -69,18 +71,24 @@ export class HumanVerificationEmailSender {
           )
         : Promise.resolve(null),
     ]);
-    const sender = resolveRelaySender({ agent, operator });
-    const inviteeName = buildRelayOwnerName(subscriber?.firstName, subscriber?.lastName);
+    // Only an agent with no picture of its own shows its mascot, so only then is its look asked for.
+    const look = agent.picture?.storageKey ? null : await this.features.mascotLookOf(agent);
+    const sender = {
+      ...resolveRelaySender({ agent, operator }),
+      pictureUrl: agentPictureOrDefaultUrl(agent, look),
+    };
 
     const { senderIntegration, from, senderName } = params.outbound;
 
     const verifyUrl = buildVerifyUrl(params.token);
     const content = buildHumanVerificationEmail({
       sender,
-      inviteeName,
+      inviteeName: subscriber?.firstName?.trim() || undefined,
+      address: params.address,
+      agentAddress: from,
       verifyUrl,
-      expiresAt: params.expiresAt,
       claimUrl: params.claimUrl,
+      isOperatorVerification: operatorId === params.subscriberId,
     });
 
     const mailFactory = new MailFactory();
@@ -122,7 +130,5 @@ export class HumanVerificationEmailSender {
 }
 
 function buildVerifyUrl(token: string): string {
-  const url = `${resolveHumanDashboardBaseUrl()}/verify/${token}`;
-
-  return process.env.NOVU_REGION?.startsWith('eu-') ? `${url}?region=eu` : url;
+  return `${resolveHumanDashboardBaseUrl()}/verify/${token}`;
 }

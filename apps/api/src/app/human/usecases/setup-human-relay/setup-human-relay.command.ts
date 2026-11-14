@@ -1,5 +1,6 @@
-import { HumanChannelViaEnum } from '@novu/shared';
-import { IsBoolean, IsEnum, IsNotEmpty, IsOptional, IsString, ValidateIf } from 'class-validator';
+import type { AgentLook } from '@novu/dal';
+import { AGENT_ANALYTICS_SOURCES, type AgentAnalyticsSource, HumanChannelViaEnum } from '@novu/shared';
+import { IsBoolean, IsEnum, IsIn, IsNotEmpty, IsObject, IsOptional, IsString, ValidateIf } from 'class-validator';
 import { EnvironmentWithUserCommand } from '../../../shared/commands/project.command';
 
 export class SetupHumanRelayCommand extends EnvironmentWithUserCommand {
@@ -22,6 +23,14 @@ export class SetupHumanRelayCommand extends EnvironmentWithUserCommand {
   @IsString()
   agentName?: string;
 
+  /**
+   * Mailbox local-part the operator chose. Missing means derive one from the agent name
+   * and walk to a free neighbour when that is taken.
+   */
+  @IsOptional()
+  @IsString()
+  inboxHandle?: string;
+
   @IsOptional()
   @IsString()
   agentDescription?: string;
@@ -29,6 +38,11 @@ export class SetupHumanRelayCommand extends EnvironmentWithUserCommand {
   @IsOptional()
   @IsString()
   email?: string;
+
+  /** Sign-in has proved `email` is the operator's. The controller only sets this for the dashboard's server. */
+  @IsOptional()
+  @IsBoolean()
+  emailVerified?: boolean;
 
   @IsOptional()
   @IsString()
@@ -41,4 +55,14 @@ export class SetupHumanRelayCommand extends EnvironmentWithUserCommand {
   @IsOptional()
   @IsEnum(HumanChannelViaEnum)
   defaultVia?: HumanChannelViaEnum;
+
+  /** The app that asked, for analytics. */
+  @IsOptional()
+  @IsIn(AGENT_ANALYTICS_SOURCES)
+  analyticsSource?: AgentAnalyticsSource;
+
+  /** The look the operator picked. Only a new agent takes it. The controller only sets this for the dashboard's server. */
+  @IsOptional()
+  @IsObject()
+  look?: AgentLook;
 }

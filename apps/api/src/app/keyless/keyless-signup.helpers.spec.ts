@@ -4,6 +4,7 @@ import { getWelcomeText } from '../agents/shared/util/agent-welcome-text';
 import {
   buildConnectClaimUrl,
   buildHumanClaimUrl,
+  buildKeylessHumanSignupCard,
   buildKeylessSignupCard,
   buildKeylessWelcomeCard,
   resolveConnectClaimBaseUrl,
@@ -14,7 +15,6 @@ describe('keyless-signup.helpers', () => {
     DASHBOARD_URL: process.env.DASHBOARD_URL,
     FRONT_BASE_URL: process.env.FRONT_BASE_URL,
     HUMAN_DASHBOARD_URL: process.env.HUMAN_DASHBOARD_URL,
-    NOVU_REGION: process.env.NOVU_REGION,
   };
 
   afterEach(() => {
@@ -66,16 +66,8 @@ describe('keyless-signup.helpers', () => {
 
   it('buildHumanClaimUrl points at the Human dashboard when it is configured', () => {
     process.env.HUMAN_DASHBOARD_URL = 'https://www.gethuman.md/';
-    process.env.NOVU_REGION = 'us-east-1';
 
     expect(buildHumanClaimUrl('abc')).to.equal('https://www.gethuman.md/claim?token=abc');
-  });
-
-  it('buildHumanClaimUrl adds the region on EU deployments', () => {
-    process.env.HUMAN_DASHBOARD_URL = 'https://www.gethuman.md';
-    process.env.NOVU_REGION = 'eu-central-1';
-
-    expect(buildHumanClaimUrl('abc')).to.equal('https://www.gethuman.md/claim?token=abc&region=eu');
   });
 
   it('buildHumanClaimUrl falls back to the dashboard claim page without a Human dashboard', () => {
@@ -97,6 +89,14 @@ describe('keyless-signup.helpers', () => {
       url: 'https://example.com/claim',
       style: 'primary',
     });
+  });
+
+  it('buildKeylessHumanSignupCard asks for an Agent Inbox account', () => {
+    const card = buildKeylessHumanSignupCard('https://agentinbox.md/claim?token=abc');
+    const text = card.children?.find((child) => child.type === 'text');
+
+    expect(text && 'content' in text ? text.content : '').to.contain('free Agent Inbox account');
+    expect(JSON.stringify(card)).to.not.contain('Novu');
   });
 
   it('buildKeylessSignupCard includes a primary signup button', () => {
